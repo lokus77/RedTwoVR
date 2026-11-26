@@ -56,7 +56,7 @@ namespace fs = std::filesystem;
 namespace rt::update {
 namespace {
 
-constexpr const char* kApi = "https://api.github.com/repos/gminustwo/red_two/releases/latest";
+constexpr const char* kApi = "https://api.github.com/repos/lokus77/RedTwoVR/releases/latest";
 
 std::mutex s_mutex;
 Status s_status;
@@ -473,7 +473,7 @@ void checkWorker() {
         s_sumsUrl = sumsUrl;
         s_assetSize = assetSize;
         s_status.latest = latest;
-        s_status.pageUrl = j.value("html_url", std::string("https://github.com/gminustwo/red_two/releases/latest"));
+        s_status.pageUrl = j.value("html_url", std::string("https://github.com/lokus77/RedTwoVR/releases/latest"));
         s_status.asset = asset;
         s_status.canInstall = can;
         if (s_status.phase == Phase::Checking) s_status.phase = isNewer ? Phase::Available : Phase::Current;
@@ -629,7 +629,7 @@ void init() {
             s.phase = Phase::Updated;
             s.from = from;
             s.latest = version();
-            s.pageUrl = std::string("https://github.com/gminustwo/red_two/releases/tag/v") + version();
+            s.pageUrl = std::string("https://github.com/lokus77/RedTwoVR/releases/tag/v") + version();
         });
     }
     const bool automated = envFlag("R2_BACKGROUND") || envFlag("R2_HEADLESS") || getenv("R2_INPUT");

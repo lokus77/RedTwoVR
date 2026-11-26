@@ -1,0 +1,176 @@
+diff --git a/include/aurora/gfx.hpp b/include/aurora/gfx.hpp
+index 8354524..744ff45 100644
+--- a/include/aurora/gfx.hpp
++++ b/include/aurora/gfx.hpp
+@@ -234,4 +234,17 @@ uint32_t current_frame() noexcept;
+ /// code that registered draw types. Callable from the game thread only.
+ void synchronize();
+ 
++/// OpenXR (red_two): the adapter the headset is connected to. Set before aurora_initialize;
++/// the adapter request then asks Dawn (D3D12/D3D11) for the adapter with this LUID.
++void set_adapter_luid(uint32_t lowPart, int32_t highPart) noexcept;
++
++/// OpenXR (red_two): invoked on the render worker for each frame of the primary target, once
++/// its commands are submitted and before it is presented, with the frame's picture (the XFB
++/// texture the window shows, at the internal resolution; null in frames without one) and the
++/// window's own texture with ImGui drawn over it (null unless the surface can be sampled:
++/// with set_adapter_luid it is asked for). Both can be sampled and are borrowed for the call.
++using PresentHook = void (*)(const wgpu::Device& device, const wgpu::Queue& queue, const wgpu::Texture& source,
++                             const wgpu::Texture& window, void* userdata);
++void set_present_hook(PresentHook hook, void* userdata) noexcept;
++
+ } // namespace aurora::gfx
+diff --git a/lib/gfx/present_target.cpp b/lib/gfx/present_target.cpp
+index a2b3553..80e6fb4 100644
+--- a/lib/gfx/present_target.cpp
++++ b/lib/gfx/present_target.cpp
+@@ -7,6 +7,7 @@
+ #include "../internal.hpp"
+ #include "../window.hpp"
+ 
++#include <aurora/gfx.hpp>
+ #include <aurora/webgpu.hpp>
+ #include <tracy/Tracy.hpp>
+ #include <algorithm>
+@@ -21,6 +22,15 @@
+ #include <vector>
+ 
+ namespace aurora::gfx {
++// OpenXR (red_two): set_present_hook
++static std::atomic<PresentHook> g_presentHook{nullptr};
++static std::atomic<void*> g_presentHookData{nullptr};
++
++void set_present_hook(PresentHook hook, void* userdata) noexcept {
++  g_presentHookData.store(userdata, std::memory_order_relaxed);
++  g_presentHook.store(hook, std::memory_order_release);
++}
++
+ namespace present {
+ 
+ struct TargetState {
+@@ -460,6 +470,15 @@ void submit(const Request& request) {
+     ZoneScopedN("Queue Submit");
+     webgpu::g_queue.Submit(1, &buffer);
+   }
++  // OpenXR: the frame's picture, and the window's (with ImGui) when it can be sampled
++  if (request.primary) {
++    if (const auto hook = g_presentHook.load(std::memory_order_acquire)) {
++      ZoneScopedN("Present hook");
++      const bool sampled = (snapshot.usage & wgpu::TextureUsage::TextureBinding) != wgpu::TextureUsage::None;
++      hook(webgpu::g_device, webgpu::g_queue, request.source.texture,
++           sampled ? surfaceTexture.texture : wgpu::Texture{}, g_presentHookData.load(std::memory_order_relaxed));
++    }
++  }
+   wgpu::ConvertibleStatus status = wgpu::Status::Error;
+   {
+     ZoneScopedN("Present");
+@@ -561,12 +580,24 @@ bool bind_xfb_surface(wgpu::Surface&& surface, const AuroraSurfaceDesc& desc) {
+ 
+     const auto size = desc.type == AURORA_SURFACE_SDL_MANAGED ? window::refresh_window_size()
+                                                               : target_size(desc.width, desc.height, desc.scale);
++    // OpenXR: the headset shows the window's picture while ImGui is up (sampled)
++    wgpu::TextureUsage usage = wgpu::TextureUsage::RenderAttachment;
++    if (webgpu::g_adapterLuidSet) {
++      wgpu::SurfaceCapabilities caps;
++      if (surface.GetCapabilities(webgpu::g_adapter, &caps) == wgpu::Status::Success &&
++          (caps.usages & wgpu::TextureUsage::TextureBinding) != wgpu::TextureUsage::None) {
++        usage |= wgpu::TextureUsage::TextureBinding;
++      } else {
++        Log.warn("Primary XFB: the window cannot be sampled; the headset will not show the menus");
++      }
++    }
+     next = create_present_target({
+         .label = "Primary XFB",
+         .surface = std::move(surface),
+         .width = size.native_fb_width,
+         .height = size.native_fb_height,
+         .scale = size.scale,
++        .usage = usage,
+         .preferredFormat = color_format(),
+         .vsync = webgpu::vsync_enabled(),
+     });
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 97f886f..48585c8 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -31,7 +31,11 @@
+ #ifdef WEBGPU_DAWN
+ #include "../dawn/TracyPlatform.hpp"
+ #include <dawn/native/DawnNative.h>
++#ifdef _WIN32
++#include <dawn/native/D3DBackend.h>
+ #endif
++#endif
++#include <aurora/gfx.hpp>
+ 
+ namespace aurora::webgpu {
+ static Module Log("aurora::gpu");
+@@ -63,6 +67,10 @@ bool g_astcTexturesSupported = false;
+ bool g_textureComponentSwizzleSupported = false;
+ static std::atomic_bool g_initialized = false;
+ static std::atomic_bool g_vsyncEnabled = true;
++// OpenXR: the headset's adapter (aurora::gfx::set_adapter_luid)
++bool g_adapterLuidSet = false;
++static uint32_t g_adapterLuidLow = 0;
++static int32_t g_adapterLuidHigh = 0;
+ 
+ namespace {
+ 
+@@ -766,7 +774,23 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+     return false;
+   }
+   {
++#if defined(_WIN32) && defined(WEBGPU_DAWN)
++    // OpenXR: the headset's adapter (set_adapter_luid)
++    dawn::native::d3d::RequestAdapterOptionsLUID luidOptions{};
++    const bool wantLuid = g_adapterLuidSet && (backend == wgpu::BackendType::D3D12 ||
++                                               backend == wgpu::BackendType::D3D11 ||
++                                               backend == wgpu::BackendType::Undefined);
++    if (wantLuid) {
++      luidOptions.adapterLUID.LowPart = g_adapterLuidLow;
++      luidOptions.adapterLUID.HighPart = g_adapterLuidHigh;
++      Log.info("Requesting the adapter with LUID {:08x}:{:08x} (OpenXR)", static_cast<uint32_t>(g_adapterLuidHigh),
++               g_adapterLuidLow);
++    }
++#endif
+     const wgpu::RequestAdapterOptions options{
++#if defined(_WIN32) && defined(WEBGPU_DAWN)
++        .nextInChain = wantLuid ? &luidOptions : nullptr,
++#endif
+         .featureLevel = wgpu::FeatureLevel::Compatibility,
+         .powerPreference = wgpu::PowerPreference::HighPerformance,
+         .backendType = backend,
+@@ -896,6 +920,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
+         }
+         requiredFeatures.push_back(feature);
+       }
++      // OpenXR: the runtime's swapchain images (ID3D12Resource) imported as textures
++      if (g_adapterLuidSet && (feature == wgpu::FeatureName::SharedTextureMemoryD3D12Resource ||
++                               feature == wgpu::FeatureName::SharedFenceDXGISharedHandle)) {
++        requiredFeatures.push_back(feature);
++      }
+ #ifdef TRACY_ENABLE
+       if (feature == wgpu::FeatureName::TimestampQuery) {
+         requiredFeatures.push_back(feature);
+@@ -1075,3 +1104,9 @@ void aurora_enable_vsync(const bool enabled) {
+   aurora::webgpu::g_vsyncEnabled.store(enabled, std::memory_order_release);
+   aurora::gfx::present::set_vsync(enabled);
+ }
++
++void aurora::gfx::set_adapter_luid(uint32_t lowPart, int32_t highPart) noexcept {
++  aurora::webgpu::g_adapterLuidLow = lowPart;
++  aurora::webgpu::g_adapterLuidHigh = highPart;
++  aurora::webgpu::g_adapterLuidSet = true;
++}
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index 62d4040..040915f 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -61,6 +61,7 @@ extern bool g_textureComponentSwizzleSupported;
+ extern bool g_dualSourceBlendingSupported;
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
++extern bool g_adapterLuidSet;  // OpenXR (red_two): aurora::gfx::set_adapter_luid was called
+ void shutdown();
+ void resize_efb(uint32_t width, uint32_t height);
+ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);

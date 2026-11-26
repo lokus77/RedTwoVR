@@ -42,6 +42,7 @@ struct Press {
 // the left / right trigger's analog value n (0-255) without the digital L / R press
 constexpr u32 kStickUp = 1u << 16, kStickDown = 1u << 17, kStickLeft = 1u << 18, kStickRight = 1u << 19;
 constexpr u32 kTrigL = 1u << 20, kTrigR = 1u << 21;
+constexpr u32 kCUp = 1u << 22, kCDown = 1u << 23;  // CUP / CDOWN: the C-stick
 std::vector<Press> s_script;
 u64 s_vblank = 0;
 
@@ -52,7 +53,8 @@ void parseScript(const char* s) {
     } names[] = {{"LEFT", 0x0001},      {"RIGHT", 0x0002},     {"DOWN", 0x0004},      {"UP", 0x0008},
                  {"Z", 0x0010},         {"R", 0x0020},         {"L", 0x0040},         {"A", 0x0100},
                  {"B", 0x0200},         {"X", 0x0400},         {"Y", 0x0800},         {"START", 0x1000},
-                 {"SUP", kStickUp},     {"SDOWN", kStickDown}, {"SLEFT", kStickLeft}, {"SRIGHT", kStickRight}};
+                 {"SUP", kStickUp},     {"SDOWN", kStickDown}, {"SLEFT", kStickLeft}, {"SRIGHT", kStickRight},
+                 {"CUP", kCUp},         {"CDOWN", kCDown}};
     while (*s) {
         char* end;
         const u64 start = strtoull(s, &end, 10);
@@ -703,7 +705,10 @@ void poll() {
     auto shape = [&st] {
         for (int i = 0; i < PAD_CHANMAX; i++)
             if (auto& e = st[i]; e.err == PAD_ERR_NONE) {
-                mainStickToGame(float(e.stickX) / 127.f, float(e.stickY) / 127.f, e.stickX, e.stickY);
+                // in flight the control stick's up / down may be reversed (setting stick_invert_y)
+                const bool invertY = settings::get().stickInvertY && gyro::flying();
+                const float stickY = float(e.stickY) / 127.f;
+                mainStickToGame(float(e.stickX) / 127.f, invertY ? -stickY : stickY, e.stickX, e.stickY);
                 cStickToGame(float(e.substickX) / 127.f, float(e.substickY) / 127.f, e.substickX, e.substickY);
                 curvePort(e, i);
             }
@@ -764,6 +769,19 @@ void poll() {
         if (scripted & kStickDown) st[0].stickY = -127;
         if (scripted & kStickLeft) st[0].stickX = -127;
         if (scripted & kStickRight) st[0].stickX = 127;
+        if (scripted & kCUp) st[0].substickY = 127;
+        if (scripted & kCDown) st[0].substickY = -127;
+    }
+    // In flight Y (the targeting computer, shown while held) toggles: a press turns it on, the
+    // next one off (setting targeting_toggle)
+    if (settings::get().targetingToggle) {
+        static bool yWas = false, yOn = false;
+        const bool flying = gyro::flying() && st[0].err == PAD_ERR_NONE;
+        const bool y = flying && (st[0].button & PAD_BUTTON_Y);
+        if (!flying) yOn = false;
+        else if (y && !yWas) yOn = !yOn;
+        yWas = y;
+        if (flying) st[0].button = u16(yOn ? st[0].button | PAD_BUTTON_Y : st[0].button & ~PAD_BUTTON_Y);
     }
     static const bool padLog = envFlag("R2_PAD_LOG");
     if (padLog && s_vblank % 30 == 0) {

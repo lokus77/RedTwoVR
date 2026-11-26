@@ -125,7 +125,9 @@ void deliverException(Ctx& c, u32 exc, u32 pc);
 // with discPrefetch when it starts one (the reader thread brings it in, and what follows it) and
 // takes the bytes with discTake when the emulated transfer ends - Pending: not in yet, finish
 // later (discLate logs a long wait); Failed: past the disc or unreadable.
-bool discOpen(const std::string& path);
+// spanish: the Spanish disc (GSWS64), whose texts, menus and voices the game then reads instead of
+// the English ones (disc_language.cpp); empty, or not usable (logged): English
+bool discOpen(const std::string& path, const std::string& spanish = {});
 bool discRead(u64 off, void* dst, u32 len);
 void discPrefetch(u64 off, u32 len);
 enum class DiscData { Ready, Pending, Failed };
@@ -197,6 +199,7 @@ void noteWidenedAspect(float aspect);  // gfx/menu.cpp: a projection aspect a ca
 void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox / PlayStation button prompts per the setting, controller and bindings
 void buttonIconsNoteTexture(u32 fmt, u32 w, u32 h, const u8* data, u32 bytes);  // a bound texture (baked prompts)
 void setMenuTiling(bool on);    // gfx/gx_bridge.cpp: widescreen menu backgrounds tiled into the sides
+void resendStereoViews();       // gfx/gx_bridge.cpp: VR: the eyes' views again (the camera turned with the head)
 }
 
 namespace input {

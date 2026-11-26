@@ -3,6 +3,7 @@
 #include "runtime.h"
 #include "discord.h"
 #include "gyro.h"
+#include "gfx/xr.h"
 #include "settings.h"
 #include "hw/gx_fifo.h"
 
@@ -222,6 +223,7 @@ void hle_GameFrameDelta(Ctx& c) {
     // gyro aiming steers only the craft in flight: menus, the pause screen and cutscenes read the
     // main stick too
     gyro::setFlight(flyingFrames > 0 && inPlay && !s_skip);
+    xr::setFlight(flyingFrames > 0 && inPlay && !s_skip);  // (VR: stereo 3D only in flight)
     gyroProbe(craft, flyingFrames > 0);
     gfx::setHudAnchoring(s.hudEdges && s.aspect != settings::Aspect::R4_3 && playerCraft() && !cinematic && inPlay);
     // menu screens only (no player craft; not the boot screen's intro and logos, whose 2D draws
@@ -379,6 +381,53 @@ void hle_MTXPerspective(Ctx& c) {
     f_8002FEA4_orig(c);
 }
 
+// VR in flight: the camera's matrix (CameraSetup's r4, 3x4) turned with the player's head, so
+// that the game culls, lays the terrain out and draws where the head looks (the eyes' views are
+// relative to it: xr::cameraRotation). R2_XR_CAM_MODE=1 takes the matrix as camera -> world
+// (0: world -> camera, the view). A matrix the game left as this wrote it (not rebuilt this
+// frame) is turned from the game's own again, not twice.
+static void xrHeadCamera(u32 matrix) {
+    float r[9];
+    if (!xr::cameraRotation(r)) return;
+    static const bool camToWorld = [] {
+        const char* e = getenv("R2_XR_CAM_MODE");
+        return e && atoi(e) == 1;
+    }();
+    struct Saved {
+        float game[12], wrote[12];
+    };
+    static std::unordered_map<u32, Saved> saved;
+    float m[12];
+    for (int i = 0; i < 12; i++) m[i] = float(s2d(rd32(matrix + 4 * i)));
+    Saved& sv = saved[matrix];
+    if (std::equal(m, m + 12, sv.wrote)) std::copy(sv.game, sv.game + 12, m);
+    std::copy(m, m + 12, sv.game);
+    static int logged = 0;
+    if (logged < 3) {
+        logged++;
+        logf("xr", "camera matrix %08X (%s): [%g %g %g %g] [%g %g %g %g] [%g %g %g %g]", matrix,
+             camToWorld ? "camera -> world" : "world -> camera", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+             m[9], m[10], m[11]);
+    }
+    float out[12];
+    if (!camToWorld) {
+        // view' = R^T view: rows i = sum_k r[k][i] * row k (the translations too)
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 4; j++)
+                out[i * 4 + j] = r[0 * 3 + i] * m[0 * 4 + j] + r[1 * 3 + i] * m[1 * 4 + j] + r[2 * 3 + i] * m[2 * 4 + j];
+    } else {
+        // camera' = camera R (the axes), the position kept
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++)
+                out[i * 4 + j] = m[i * 4 + 0] * r[0 * 3 + j] + m[i * 4 + 1] * r[1 * 3 + j] + m[i * 4 + 2] * r[2 * 3 + j];
+            out[i * 4 + 3] = m[i * 4 + 3];
+        }
+    }
+    for (int i = 0; i < 12; i++) wr32(matrix + 4 * i, d2s(out[i]));
+    for (int i = 0; i < 12; i++) sv.wrote[i] = float(s2d(rd32(matrix + 4 * i)));
+    gfx::resendStereoViews();
+}
+
 void hle_CameraSetup(Ctx& c) {
     double aspect = c.f[1];
     const double fov = c.f[2];
@@ -411,13 +460,23 @@ void hle_CameraSetup(Ctx& c) {
         }
     }
     static const bool gameCulling = envFlag("R2_GAME_CULLING");
-    if (gameCulling || display < 4.0 / 3.0 + 0.01 || !(aspect > 0.5 && aspect < 8.0) || !(fov > 1.0 && fov < 170.0)) {
+    // VR stereo 3D in flight: the headset sees far more than the game's view (a wider fov, and
+    // the head turns), so the mission's volume opens kXrMargin times (R2_XR_CULL_MARGIN), even
+    // in a 4:3 window
+    // (setting xr_view_range; R2_XR_CULL_MARGIN for tests)
+    static const char* xrMarginEnv = getenv("R2_XR_CULL_MARGIN");
+    const double xrMargin = std::clamp(xrMarginEnv ? atof(xrMarginEnv) : double(settings::get().xrViewRange), 1.0, 12.0);
+    const bool xrFlight = xr::stereo() && xr::active() && playerCraft() != 0;
+    if (gameCulling || (display < 4.0 / 3.0 + 0.01 && !xrFlight) || !(aspect > 0.5 && aspect < 8.0) || !(fov > 1.0 && fov < 170.0)) {
         f_7FC14CEC_orig(c);
         return;
     }
     const u32 view = c.r[3];
     const u32 matrix = c.r[4];
     const u32 craft = playerCraft();
+    // (tests only, R2_XR_HEAD_CAMERA=1: the player could not see their craft, and it made them dizzy)
+    static const bool headCamera = envFlag("R2_XR_HEAD_CAMERA");
+    if (headCamera && xrFlight && craft) xrHeadCamera(matrix);
     // already at the display's aspect (setGameAspect: the flight and HUD cameras): not opened
     const bool widened = std::abs(aspect - display) < 0.002;
     const u32 lines = viXfbLines();
@@ -435,7 +494,7 @@ void hle_CameraSetup(Ctx& c) {
     // (ship select) renders at 2.105 but sets the camera up once more per frame at 4:3, and that
     // volume decides what is there (the bay's sides popped in as the camera panned).
     const double base = v > 1.0 ? std::max(aspect, 4.0 / 3.0 * v) : aspect;
-    const double margin = craft ? terrainMargin : sceneMargin;
+    const double margin = craft ? (xrFlight ? std::max(xrMargin, terrainMargin) : terrainMargin) : sceneMargin;
     // in missions the horizontal fov may pass 90 degrees (hle_CameraHFovAtan)
     struct WideVolume {
         explicit WideVolume(bool on) { s_wideVolume = on; }
@@ -474,6 +533,7 @@ void hle_CameraSetup(Ctx& c) {
     if (sideways) gfx::noteWidenedAspect(float(projAspect));
     wr32(view + 0x12C, d2s(projAspect));
     wr32(view + 0x134, d2s(fov));
+    if (xrFlight && craft) xr::setGameView(float(fov), float(projAspect));  // (the HUD's plane)
     // The camera keeps its own copy of the projection (+0xA4, and +0xE4 derived from it; built
     // by 0x7FC14B8C from the aspect, fov and near/far): the game projects points with it, e.g.
     // to place the engine glows. Built for the culling volume above, it put them closer to the

@@ -166,6 +166,7 @@ target_compile_definitions(rcheevos PUBLIC RC_CLIENT_SUPPORTS_HASH PRIVATE _CRT_
 set(R2_RUNTIME_SOURCES
     src/runtime/main.cpp
     src/runtime/disc_reader.cpp
+    src/runtime/disc_language.cpp
     src/runtime/memory.cpp
     src/runtime/cpu.cpp
     src/runtime/events.cpp
@@ -194,6 +195,7 @@ set(R2_RUNTIME_SOURCES
     src/runtime/dolphin_import.cpp
     src/runtime/gfx/menu.cpp
     src/runtime/gfx/touch.cpp
+    src/runtime/gfx/xr.cpp
     src/runtime/savestate.cpp
     src/runtime/hotkeys.cpp
     src/runtime/achievements.cpp
@@ -246,6 +248,23 @@ target_link_libraries(red_two PRIVATE r2game aurora::core aurora::gx aurora::vi 
     rcheevos PNG::PNG nlohmann_json::nlohmann_json)
 if(WIN32)
     target_link_libraries(red_two PRIVATE winmm dbghelp winhttp ZLIB::ZLIB)
+endif()
+# --- OpenXR (VR on Windows: src/runtime/gfx/xr.cpp): the Khronos loader, linked in, Apache-2.0 --
+option(R2_OPENXR "OpenXR support (the game on a screen in a VR headset; --xr)" ${WIN32})
+if(R2_OPENXR AND WIN32)
+    include(FetchContent)
+    set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+    set(BUILD_CONFORMANCE_TESTS OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(openxr
+        URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.65.tar.gz
+        EXCLUDE_FROM_ALL)
+    FetchContent_MakeAvailable(openxr)
+    target_link_libraries(red_two PRIVATE openxr_loader d3d12 dxgi)
+    target_compile_definitions(red_two PRIVATE R2_OPENXR=1)
+endif()
+if(WIN32)
 elseif(ANDROID)
     # Android: position-independent (save states then load only within a session: the system
     # puts the library anywhere), no stack protector (as the generated code), segments aligned

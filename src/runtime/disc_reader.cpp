@@ -217,12 +217,19 @@ void readerThread() {
 
 }  // namespace
 
-bool discOpen(const std::string& path) {
+std::unique_ptr<disc::Image> localizeDisc(std::unique_ptr<disc::Image> base, const std::string& spanishPath, std::string& why);
+
+bool discOpen(const std::string& path, const std::string& spanish) {
     std::string err;
     auto img = disc::open(path, err);
     if (!img) {
         logf("disc", "%s", err.c_str());
         return false;
+    }
+    if (!spanish.empty()) {
+        std::string why;
+        img = localizeDisc(std::move(img), spanish, why);
+        if (!why.empty()) logf("disc", "Spanish disc %s not used (the game stays in English): %s", spanish.c_str(), why.c_str());
     }
     logf("disc", "%s image %s (%llu MiB)", img->kind(), path.c_str(), (unsigned long long)(img->size() >> 20));
     const bool usable = img->size() > 0x440;

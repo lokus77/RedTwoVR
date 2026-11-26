@@ -319,7 +319,7 @@ std::string activity(std::string& said) {
     if (!state.empty()) a += ",\"state\":" + json(state);
     if (const std::int64_t t = s_gameStart.load(); !launcher && t) a += ",\"timestamps\":{\"start\":" + std::to_string(t) + "}";
     a += ",\"assets\":{\"large_image\":\"icon\",\"large_text\":" + json(std::string("Red Two ") + update::version()) + "}";
-    a += ",\"buttons\":[{\"label\":\"Get Red Two\",\"url\":\"https://github.com/gminustwo/red_two\"}";
+    a += ",\"buttons\":[{\"label\":\"Get Red Two\",\"url\":\"https://github.com/lokus77/RedTwoVR\"}";
     if (*R2_DISCORD_INVITE) a += ",{\"label\":\"Join the Discord\",\"url\":" + json(R2_DISCORD_INVITE) + "}";
     a += "]}";
     return a;

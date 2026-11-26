@@ -653,13 +653,13 @@ void discNoteRead(u64 off) {
 }
 
 std::string discFileAt(u64 off) {
+    const DiscFile* in = nullptr;  // the smallest (the Spanish disc's data.dat reaches past the others)
     for (auto& f : s_files)
-        if (off >= f.off && off < u64(f.off) + f.size) {
-            char b[32];
-            snprintf(b, sizeof b, "+0x%llX", (unsigned long long)(off - f.off));
-            return f.path + b;
-        }
-    return "";
+        if (off >= f.off && off < u64(f.off) + f.size && (!in || f.size < in->size)) in = &f;
+    if (!in) return "";
+    char b[32];
+    snprintf(b, sizeof b, "+0x%llX", (unsigned long long)(off - in->off));
+    return in->path + b;
 }
 
 // --- guest thread dump (debugging; races with the guest, reads memory without faulting) ---
@@ -1046,6 +1046,49 @@ static void logSessionHeader(int argc, char** argv) {
 // orig/, then every .iso / .gcm / .rvz / .wia in the folders a player keeps it in - this
 // program's, the AppImage's, the user data folder (%APPDATA%\Red Two, ~/.local/share/Red Two),
 // and on Linux EmuDeck's (~/Emulation/roms/gc) - whose disc ID is GSWE64.
+static bool isSpanishImage(const std::string& path) {
+    std::string err;
+    const auto img = disc::open(path, err);
+    rt::u8 id[8];
+    return img && img->read(0, id, sizeof id) && !memcmp(id, "GSWS64", 6);
+}
+
+// The game in Spanish (setting game_language es): its pieces from R2_SPANISH_DISC, or the place found
+// before (spanish_disc_path), or beside the USA disc: the folder red_two_es (--extract-spanish), else
+// a GSWS64 disc image (then remembered). "": English.
+namespace rt {
+std::string spanishProblem(const std::string& path);  // disc_language.cpp
+bool extractSpanish(const std::string& discPath, const std::string& dir, std::string& why);
+}
+
+static std::string spanishDisc(const std::string& usa) {
+    namespace fs = std::filesystem;
+    if (const char* v = getenv("R2_SPANISH_DISC"); v && *v) return v;
+    rt::settings::Settings& s = rt::settings::get();
+    if (s.gameLanguage != 1) return "";
+    if (!s.spanishDiscPath.empty() && rt::spanishProblem(s.spanishDiscPath).empty()) return s.spanishDiscPath;
+    std::error_code ec;
+    const fs::path dir = fs::absolute(fs::path(std::u8string(usa.begin(), usa.end())), ec).parent_path();
+    auto found = [&](const fs::path& p) {
+        const std::u8string u8 = p.u8string();
+        s.spanishDiscPath.assign(u8.begin(), u8.end());
+        rt::settings::save();
+        return s.spanishDiscPath;
+    };
+    if (const std::u8string folder = (dir / "red_two_es").u8string(); rt::spanishProblem(std::string(folder.begin(), folder.end())).empty())
+        return found(dir / "red_two_es");
+    for (fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end; it.increment(ec)) {
+        std::string ext = it->path().extension().string();
+        for (auto& c : ext) c = char(tolower(static_cast<unsigned char>(c)));
+        if (ext != ".iso" && ext != ".gcm" && ext != ".rvz" && ext != ".wia") continue;
+        const std::u8string u8 = it->path().u8string();
+        if (isSpanishImage(std::string(u8.begin(), u8.end()))) return found(it->path());
+    }
+    rt::logf("disc", "game language Spanish, but neither red_two_es nor a Spanish disc (GSWS64) in %s: the game stays in English",
+             dir.string().c_str());
+    return "";
+}
+
 static std::string findDisc() {
     namespace fs = std::filesystem;
     for (const char* p : {"orig/GSWE64.iso", "orig/GSWE64.rvz", "GSWE64.rvz", "GSWE64.iso"})
@@ -1197,6 +1240,25 @@ int main(int argc, char** argv) {
     eventsInit();
     logSessionHeader(argc, argv);
     settings::load();  // after eventsInit: logging needs the time base
+    // --extract-spanish <the Spanish disc> [<folder>]: the pieces of it the game in Spanish reads, into
+    // that folder (red_two_es beside the disc by default), so the disc itself is not needed; exit
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--extract-spanish") || i + 1 >= argc) continue;
+        namespace fs = std::filesystem;
+        const std::string from = argv[i + 1];
+        std::error_code ec;
+        const fs::path def = fs::absolute(fs::path(std::u8string(from.begin(), from.end())), ec).parent_path() / "red_two_es";
+        const std::u8string d8 = def.u8string();
+        const std::string to = i + 2 < argc ? std::string(argv[i + 2]) : std::string(d8.begin(), d8.end());
+        std::string why;
+        const bool ok = extractSpanish(from, to, why);
+        const std::string msg = ok ? "The Spanish texts, menus and voices are in " + to +
+                                         ". With Game language: Spanish, Red Two reads them there (the Spanish disc is no longer needed)."
+                                   : "Could not extract the Spanish pieces from " + from + ": " + why;
+        logf("disc", "%s", msg.c_str());
+        if (!envFlag("R2_LOG_STDERR")) SDL_ShowSimpleMessageBox(ok ? SDL_MESSAGEBOX_INFORMATION : SDL_MESSAGEBOX_ERROR, "Red Two", msg.c_str(), nullptr);
+        quit(ok ? 0 : 1);
+    }
     // --import-dolphin[=saves,textures,codes]: bring this game's things over from Dolphin, exit
     for (int i = 1; i < argc; i++) {
         if (!strncmp(argv[i], "--import-dolphin", 16) && (argv[i][16] == 0 || argv[i][16] == '='))
@@ -1222,6 +1284,16 @@ int main(int argc, char** argv) {
             if (!gfxOn) fatal("--disc %s: %s", disc.c_str(), problem.c_str());
             discNote = "The disc image given with --disc (" + disc + ") cannot be used: " + problem;
             disc.clear();
+        } else {
+            // remembered (setting disc_path): the next start needs no --disc
+            std::error_code ec;
+            const std::filesystem::path abs = std::filesystem::absolute(std::filesystem::path(std::u8string(disc.begin(), disc.end())), ec);
+            const std::u8string a = ec ? std::u8string(disc.begin(), disc.end()) : abs.u8string();
+            const std::string full(a.begin(), a.end());
+            if (settings::get().discPath != full) {
+                settings::get().discPath = full;
+                settings::save();
+            }
         }
     } else if (const std::string saved = settings::get().discPath; !saved.empty()) {
         if (const std::string problem = discProblem(saved); problem.empty()) {
@@ -1245,7 +1317,7 @@ int main(int argc, char** argv) {
     } else {
         input::init(false);  // scripted input still works without a renderer
     }
-    if (!discOpen(disc)) fatal("cannot open the disc image %s", disc.c_str());
+    if (!discOpen(disc, spanishDisc(disc))) fatal("cannot open the disc image %s", disc.c_str());
     loadFst();
     loadLevelDirs();
     Ctx* boot = nullptr;

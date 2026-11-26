@@ -43,10 +43,43 @@ struct Settings {
     // into the game. On until the player turns it off; --launcher / R2_LAUNCHER=1 show it anyway.
     bool launcher = true;
     // At start, ask GitHub whether a newer release is out (update.cpp); the menu offers it.
-    bool checkUpdates = true;
+    bool checkUpdates = false;
     // Discord Rich Presence (discord.cpp): the player's Discord profile shows the mission and what
     // they are doing in it, through the Discord app on this computer. Off: nothing goes to Discord.
-    bool discordPresence = true;
+    bool discordPresence = false;  // (no switch in this build's menu: off unless set in settings.ini)
+    // The menu's language (the launcher and the in-game menu): 0 English, 1 Spanish (gfx/menu_es.inc)
+    int language = 0;
+    // The game's language (its texts, menus and voices): 0 English, 1 Spanish - from the Spanish disc
+    // (GSWS64, found beside the USA one or at spanishDiscPath; disc_language.cpp). From the next start.
+    int gameLanguage = 0;
+    std::string spanishDiscPath;
+    // VR stereo 3D (--xr, gfx/xr.cpp; also set in the headset: hold the right grip and move
+    // the right thumbstick): game units per metre of head movement (more: stronger depth, a
+    // smaller-looking world), and how far ahead of the game's camera the eyes sit, in metres.
+    float xrWorldScale = 1.f;
+    float xrCameraForward = 0.f;
+    // The 3D screen (not flying: the hangar, cinematics): how far apart the eyes are, times
+    // the real distance between them (1: true to the scene; more: stronger).
+    float xrScreenDepth = 2.f;
+    // In flight: the HUD (and the radar's window) on a plane this far ahead of the game's camera,
+    // in game units: fixed to the game's view, the reticle over the aim point.
+    float xrHudDistance = 10.f;
+    // The headset's refresh rate asked of the OpenXR runtime (XR_FB_display_refresh_rate; Quest
+    // through Virtual Desktop, Quest Link, SteamVR may offer it): 0 = the runtime's own, else 72,
+    // 80, 90 or 120 Hz. The game still runs at its own rate (fps); the runtime fills the headset's
+    // frames in between from the last one, turned with the head.
+    int xrRefreshRate = 0;
+    // VR: start in the headset (OpenXR) as --xr does; --no-xr starts on the monitor anyway
+    bool vr = false;
+    // Stereo 3D in flight (off: the game on a flat virtual screen all the time); from the next start
+    bool xrStereo = true;
+    // In flight: how far round the game's camera the game draws the world (times its own view):
+    // the headset sees more than the game's 40 degrees. More: no ground missing under the craft
+    // when looking down or to the sides; less: fewer far buildings appearing late.
+    int xrViewRange = 5;
+    // The flat virtual screen (menus, hangar, cinematics; and everything with stereo 3D off):
+    // its width in metres, 2.5 m away
+    float xrScreenWidth = 3.2f;
     // The game disc image chosen in the launcher (its disc page): used at every start unless
     // --disc gives another; empty or unusable: found next to the program, else asked for.
     std::string discPath;
@@ -126,6 +159,12 @@ struct Settings {
     bool bumperClicks = false;
     int stickSensitivity = 100;  // 25..200
     StickCurve stickCurve = StickCurve::Smooth;
+    // In flight, the control stick's up / down reversed (forward climbs, back dives); the menus
+    // keep it as it is.
+    bool stickInvertY = false;
+    // In flight, Y (the targeting computer) toggles: a press turns it on, the next off. Off: it
+    // shows while Y is held, as on the GameCube.
+    bool targetingToggle = true;
     // Gyro aiming (gyro.cpp): turning and tilting the controller (the Steam Deck itself, a
     // DualSense, a Switch Pro Controller) steers the craft in flight, on top of the stick. The
     // button is an SDL gamepad button name (misc3 is the Deck's left stick touch; "touch" a finger

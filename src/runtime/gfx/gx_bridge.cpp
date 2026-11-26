@@ -12,6 +12,7 @@
 //   * EFB copies: source rect, destination size/format/address; display copies end the frame
 // Display lists are inlined by the CP model (hw/gx_fifo.cpp), so CALL_DL never arrives here.
 #include "gx_bridge.h"
+#include "gfx/xr.h"
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -256,10 +257,36 @@ void gpSync() {
     if (s_gxThread && s_inFrame) fifo::drain();
 }
 
+// VR stereo: each frame's eye views (gfx/xr.cpp), before its first draw
+bool s_stereoSent = false;
+void sendStereoViews() {
+    if (!xr::stereo()) return;
+    float views[2][16];
+    const bool on = xr::frameViews(views);
+    if (!on && !s_stereoSent) return;
+    s_stereoSent = on;
+    aur(GX_AURORA_SET_STEREO_VIEWS);
+    fifo::write_u8(on ? 1 : 0);
+    if (on)
+        for (auto& eye : views)
+            for (float v : eye) fifo::write_f32(v);
+}
+
+void ensureFrame();
+
+}  // namespace
+
+void resendStereoViews() {
+    if (s_inFrame) sendStereoViews();
+}
+
+namespace {
+
 void ensureFrame() {
     if (s_inFrame) return;
     pollEvents();
     s_inFrame = aurora_begin_frame();
+    if (s_inFrame) sendStereoViews();
     if (s_inFrame && s_testClear) {
         aur(GX_AURORA_CLEAR);
         fifo::write_u8(0x0F);  // whole target, color, alpha, depth
@@ -1923,7 +1950,11 @@ bool init(int argc, char** argv, std::string& disc, const std::string& discNote)
     // pipelines are neither derived from the cached shaders nor built from their stored rows
     // (patch 0028) - Aurora's own default is on, and applyDisplaySettings below comes too late.
     AuroraSetUberShaders(uberShaderMode());
+    // OpenXR (--xr / R2_XR=1): the headset's adapter, on D3D12 (gfx/xr.cpp)
+    const bool xrWanted = xr::preinit(argc, argv);
+    if (xrWanted) cfg.desiredBackend = BACKEND_D3D12;
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
+    if (xrWanted) xr::start();
     if (background) {
         if (SDL_Window* w = aurora_get_window()) {
             if (void* hwnd = SDL_GetPointerProperty(SDL_GetWindowProperties(w), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr))

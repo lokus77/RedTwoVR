@@ -1,0 +1,1048 @@
+diff --git a/include/aurora/gfx.hpp b/include/aurora/gfx.hpp
+index 2f16d4d..4e8a072 100644
+--- a/include/aurora/gfx.hpp
++++ b/include/aurora/gfx.hpp
+@@ -238,13 +238,32 @@ void synchronize();
+ /// the adapter request then asks Dawn (D3D12/D3D11) for the adapter with this LUID.
+ void set_adapter_luid(uint32_t lowPart, int32_t highPart) noexcept;
+ 
++/// VR stereo (red_two): set before aurora_initialize. The EFB holds two eyes side by side; the
++/// passes drawn into it are encoded once per eye (GX_AURORA_SET_STEREO_VIEWS gives the eyes'
++/// projections), and display copies put the right eye into an XFB of its own (the present
++/// hook's `right`; the window shows the left eye).
++void set_stereo(bool enabled) noexcept;
++/// VR stereo with the headset's views: the 2D draws (the HUD) and 3D views in windows of their
++/// own lie on a plane this far ahead of the game's camera (game units), fixed to its view.
++void set_stereo_hud_distance(float distance) noexcept;
++/// ... and how far ahead of the game's camera the eyes sit (game units): the plane keeps its
++/// distance and size as seen from them.
++void set_stereo_hud_offset(float forward) noexcept;
++/// ... and the game's view those 2D draws are laid out for, as view tangents (half width, half
++/// height): the camera's own (its projection in the GX stream may be a wider culling volume's).
++/// 0: taken from the 3D draws' projection.
++void set_stereo_frame_tan(float halfWidth, float halfHeight) noexcept;
++
+ /// OpenXR (red_two): invoked on the render worker for each frame of the primary target, once
+ /// its commands are submitted and before it is presented, with the frame's picture (the XFB
+ /// texture the window shows, at the internal resolution; null in frames without one) and the
+ /// window's own texture with ImGui drawn over it (null unless the surface can be sampled:
+ /// with set_adapter_luid it is asked for). Both can be sampled and are borrowed for the call.
++/// With set_stereo, `right` is the right eye's XFB (source: the left eye's); null otherwise.
++/// `frame` is current_frame() as it was while the frame was recorded.
+ using PresentHook = void (*)(const wgpu::Device& device, const wgpu::Queue& queue, const wgpu::Texture& source,
+-                             const wgpu::Texture& window, void* userdata);
++                             const wgpu::Texture& right, const wgpu::Texture& window, uint32_t frame,
++                             void* userdata);
+ void set_present_hook(PresentHook hook, void* userdata) noexcept;
+ 
+ } // namespace aurora::gfx
+diff --git a/include/dolphin/gx/GXAurora.h b/include/dolphin/gx/GXAurora.h
+index bbfd501..aca9901 100644
+--- a/include/dolphin/gx/GXAurora.h
++++ b/include/dolphin/gx/GXAurora.h
+@@ -181,6 +181,18 @@ extern "C" {
+  */
+ #define GX_AURORA_CLEAR 0x0052
+ 
++/**
++ * VR stereo (red_two): the per-eye views of the perspective draws that follow (with
++ * aurora::gfx::set_stereo the EFB holds both eyes side by side). Each eye's projection takes
++ * its x and y rows from the eye's frustum and z and w from the game's projection, applied to
++ * the game's view-space position moved into the eye's space. Followed by:
++ *   u8  1 = on (two eyes follow), 0 = off (draws as without stereo)
++ *   two times (left, right):
++ *     f32 tanLeft, tanRight, tanDown, tanUp (the eye's frustum: tangents of its half angles)
++ *     f32 view[12] (3x4 rows: eye space from the game's view space)
++ */
++#define GX_AURORA_SET_STEREO_VIEWS 0x0053
++
+ #define GX2_SET_POLYGON_OFFSET 0x1000
+ 
+ /*
+diff --git a/lib/dolphin/gx/GXFrameBuffer.cpp b/lib/dolphin/gx/GXFrameBuffer.cpp
+index a1d9cf3..e4ee286 100644
+--- a/lib/dolphin/gx/GXFrameBuffer.cpp
++++ b/lib/dolphin/gx/GXFrameBuffer.cpp
+@@ -141,6 +141,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
+   current.width = g_gxState.texCopyDstWidth;
+   current.height = g_gxState.texCopyDstHeight;
+   current.pixelFormat = g_gxState.pixelFmt;
++  current.wholeFrame = static_cast<float>(g_gxState.texCopySrc.width) >= static_cast<float>(logical_fb_size().x) * 0.9f;
+ 
+   const auto clearColor = clear && g_gxState.colorUpdate;
+   const auto clearAlpha = clear && g_gxState.alphaUpdate && efb_has_alpha(g_gxState.pixelFmt);
+diff --git a/lib/gfx/clear.cpp b/lib/gfx/clear.cpp
+index 8b224f7..4c4122c 100644
+--- a/lib/gfx/clear.cpp
++++ b/lib/gfx/clear.cpp
+@@ -4,6 +4,11 @@
+ #include "../webgpu/gpu.hpp"
+ #include "tracy/Tracy.hpp"
+ 
++namespace aurora::gfx {
++// VR stereo (encoding.cpp): the x offset of the eye being encoded (0 outside stereo passes)
++uint32_t stereo_eye_x() noexcept;
++} // namespace aurora::gfx
++
+ namespace aurora::gfx::clear {
+ using webgpu::g_device;
+ 
+@@ -146,7 +151,8 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass, const wgp
+   pass.SetBlendConstant(&data.color);
+   pass.SetViewport(0.f, 0.f, static_cast<float>(targetSize.width), static_cast<float>(targetSize.height), data.depth,
+                    data.depth);
+-  pass.SetScissorRect(data.rect.x, data.rect.y, data.rect.width, data.rect.height);
++  // (VR stereo: the rect is in the eye's pixels, in its half of the target)
++  pass.SetScissorRect(data.rect.x + stereo_eye_x(), data.rect.y, data.rect.width, data.rect.height);
+   pass.Draw(3);
+ }
+ } // namespace aurora::gfx::clear
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+index 1eaf829..cc502e7 100644
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -34,17 +34,32 @@ namespace {
+ constexpr Module Log{"aurora::gfx"};
+ WGPURenderPipeline g_currentPipeline = nullptr;
+ 
++// VR stereo: the half of the EFB the eye being encoded draws into (x offset and width; 0 width:
++// not a stereo pass, the whole target)
++uint32_t g_eyeX = 0, g_eyeWidth = 0, g_eyeHeight = 0;
++// the viewport and scissor the pass's commands set last (stereo_hud_viewport puts them back)
++Viewport g_lastViewport{};
++ClipRect g_lastScissor{};
++wgpu::Extent3D g_lastScissorSize{};
++bool g_hasViewport = false, g_hasScissor = false;
++
+ void apply_viewport(const wgpu::RenderPassEncoder& pass, const Viewport& vp) {
++  g_lastViewport = vp;
++  g_hasViewport = true;
+   // The depth range is applied in the vertex shader (depth_range uniform).
+-  pass.SetViewport(vp.left, vp.top, vp.width, vp.height, 0.f, 1.f);
++  pass.SetViewport(vp.left + static_cast<float>(g_eyeX), vp.top, vp.width, vp.height, 0.f, 1.f);
+ }
+ 
+ void apply_scissor(const wgpu::RenderPassEncoder& pass, const ClipRect& sc, const wgpu::Extent3D& size) {
+-  const auto x = std::clamp(static_cast<uint32_t>(sc.x), 0u, size.width);
++  g_lastScissor = sc;
++  g_lastScissorSize = size;
++  g_hasScissor = true;
++  const uint32_t width = g_eyeWidth ? g_eyeWidth : size.width;
++  const auto x = std::clamp(static_cast<uint32_t>(sc.x), 0u, width);
+   const auto y = std::clamp(static_cast<uint32_t>(sc.y), 0u, size.height);
+-  const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, size.width - x);
++  const auto w = std::clamp(static_cast<uint32_t>(sc.width), 0u, width - x);
+   const auto h = std::clamp(static_cast<uint32_t>(sc.height), 0u, size.height - y);
+-  pass.SetScissorRect(x, y, w, h);
++  pass.SetScissorRect(x + g_eyeX, y, w, h);
+ }
+ 
+ DrawContext make_draw_context(const RenderPass& passInfo) {
+@@ -104,7 +119,33 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
+   }
+ }
+ 
++void render_pass_eye(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo);
++
++// VR stereo: a pass drawn into the EFB is encoded once per eye, each in its half, the draws
++// taking that eye's uniform blocks (gx::g_stereoDrawEye)
+ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
++  if (!passInfo.stereo) {
++    render_pass_eye(pass, frame, passInfo);
++    return;
++  }
++  const auto& size = passInfo.colorAttachments[SceneColorAttachmentIndex].size;
++  const uint32_t eyeWidth = size.width / 2;
++  for (int eye = 0; eye < 2; ++eye) {
++    g_eyeX = static_cast<uint32_t>(eye) * eyeWidth;
++    g_eyeWidth = eyeWidth;
++    g_eyeHeight = size.height;
++    g_hasViewport = g_hasScissor = false;
++    gx::g_stereoDrawEye = eye;
++    pass.SetViewport(static_cast<float>(g_eyeX), 0.f, static_cast<float>(eyeWidth), static_cast<float>(size.height),
++                     0.f, 1.f);
++    pass.SetScissorRect(g_eyeX, 0, eyeWidth, size.height);
++    render_pass_eye(pass, frame, passInfo);
++  }
++  g_eyeX = g_eyeWidth = g_eyeHeight = 0;
++  gx::g_stereoDrawEye = -1;
++}
++
++void render_pass_eye(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
+   ZoneScoped;
+   g_currentPipeline = nullptr;
+ #ifdef AURORA_GFX_DEBUG_GROUPS
+@@ -362,6 +403,14 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+         .depthOrArrayLayers = 1,
+     };
+     cmd.CopyTextureToTexture(&src, &dst, &size);
++    if (passInfo.stereo && passInfo.xfbDstRight) {
++      // VR stereo: the right eye's half into its own XFB
++      auto srcRight = src;
++      srcRight.origin.x += passInfo.colorAttachments[SceneColorAttachmentIndex].size.width / 2;
++      auto dstRight = dst;
++      dstRight.texture = passInfo.xfbDstRight;
++      cmd.CopyTextureToTexture(&srcRight, &dstRight, &size);
++    }
+   }
+ }
+ 
+@@ -431,6 +480,29 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
+ }
+ } // namespace
+ 
++void stereo_hud_viewport(const wgpu::RenderPassEncoder& pass, bool on) {
++  if (g_eyeWidth == 0) {
++    return;
++  }
++  if (on) {
++    pass.SetViewport(static_cast<float>(g_eyeX), 0.f, static_cast<float>(g_eyeWidth), static_cast<float>(g_eyeHeight),
++                     0.f, 1.f);
++    pass.SetScissorRect(g_eyeX, 0, g_eyeWidth, g_eyeHeight);
++    return;
++  }
++  if (g_hasViewport) {
++    apply_viewport(pass, g_lastViewport);
++  } else {
++    pass.SetViewport(static_cast<float>(g_eyeX), 0.f, static_cast<float>(g_eyeWidth), static_cast<float>(g_eyeHeight),
++                     0.f, 1.f);
++  }
++  if (g_hasScissor) {
++    apply_scissor(pass, g_lastScissor, g_lastScissorSize);
++  } else {
++    pass.SetScissorRect(g_eyeX, 0, g_eyeWidth, g_eyeHeight);
++  }
++}
++
+ namespace detail {
+ void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
+   copy_staging_to_high_water(cmd, frame, op);
+@@ -466,6 +538,8 @@ void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op)
+ }
+ } // namespace detail
+ 
++uint32_t stereo_eye_x() noexcept { return g_eyeX; }
++
+ void bind_pipeline(const wgpu::RenderPipeline& pipeline, const wgpu::RenderPassEncoder& pass) {
+   if (pipeline.Get() == g_currentPipeline) {
+     return;
+diff --git a/lib/gfx/encoding.hpp b/lib/gfx/encoding.hpp
+index 1920bc8..2b1d426 100644
+--- a/lib/gfx/encoding.hpp
++++ b/lib/gfx/encoding.hpp
+@@ -6,6 +6,9 @@ namespace aurora::gfx {
+ 
+ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass);
+ void bind_pipeline(const wgpu::RenderPipeline& pipeline, const wgpu::RenderPassEncoder& pass);
++// VR stereo: a HUD draw (gx::stereo_hud_projection) takes the whole eye as its viewport and
++// scissor (on), then the pass's own again (off)
++void stereo_hud_viewport(const wgpu::RenderPassEncoder& pass, bool on);
+ 
+ namespace detail {
+ void encode_op(wgpu::CommandEncoder& encoder, FramePacket& frame, const FrameOp& op);
+diff --git a/lib/gfx/frame_packet.hpp b/lib/gfx/frame_packet.hpp
+index 6dc22a7..9989978 100644
+--- a/lib/gfx/frame_packet.hpp
++++ b/lib/gfx/frame_packet.hpp
+@@ -101,6 +101,7 @@ struct RenderPass {
+   wgpu::TextureView snapshotDepthDst;
+   wgpu::Texture snapshotNormalDst;
+   wgpu::Texture xfbDst;
++  wgpu::Texture xfbDstRight; // VR stereo: the right eye's XFB (its half of the EFB)
+   ClipRect xfbRect;
+   uint32_t xfbDstY = 0; // line within a composed XFB
+   float clearDepthValue = 1.f;
+@@ -117,6 +118,7 @@ struct RenderPass {
+   bool discardable = false;
+   bool sealed = false;
+   bool presentConsumer = false;
++  bool stereo = false; // VR stereo: drawn into the EFB, encoded once per eye (its half)
+   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
+ 
+   RenderTargetLayout target_layout() const noexcept;
+diff --git a/lib/gfx/present_target.cpp b/lib/gfx/present_target.cpp
+index 357fc31..5731488 100644
+--- a/lib/gfx/present_target.cpp
++++ b/lib/gfx/present_target.cpp
+@@ -475,8 +475,9 @@ void submit(const Request& request) {
+     if (const auto hook = g_presentHook.load(std::memory_order_acquire)) {
+       ZoneScopedN("Present hook");
+       const bool sampled = (snapshot.usage & wgpu::TextureUsage::TextureBinding) != wgpu::TextureUsage::None;
+-      hook(webgpu::g_device, webgpu::g_queue, request.source.texture,
+-           sampled ? surfaceTexture.texture : wgpu::Texture{}, g_presentHookData.load(std::memory_order_relaxed));
++      hook(webgpu::g_device, webgpu::g_queue, request.source.texture, request.stereoRight,
++           sampled ? surfaceTexture.texture : wgpu::Texture{}, request.frame,
++           g_presentHookData.load(std::memory_order_relaxed));
+     }
+   }
+   wgpu::ConvertibleStatus status = wgpu::Status::Error;
+diff --git a/lib/gfx/present_target.hpp b/lib/gfx/present_target.hpp
+index 84eba4f..883f893 100644
+--- a/lib/gfx/present_target.hpp
++++ b/lib/gfx/present_target.hpp
+@@ -27,6 +27,8 @@ struct TargetSnapshot {
+ struct Request {
+   TargetSnapshot target;
+   webgpu::TextureWithSampler source;
++  wgpu::Texture stereoRight; // VR stereo: the right eye's XFB (primary present only)
++  uint32_t frame = 0;        // current_frame() while it was recorded (primary present only)
+   webgpu::Viewport viewport{};
+   wgpu::BindGroup rmlBindGroup;
+   bool rmlOverlay = false;
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+index 15d9f90..7b80002 100644
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -113,6 +113,7 @@ void set_efb_targets(RenderPass& pass) {
+   pass.msaaSamples = layout.sampleCount;
+   pass.hasDepth = true;
+   pass.hasStencil = false;
++  pass.stereo = webgpu::g_stereo;
+ }
+ 
+ void set_single_color_target(RenderPass& pass, wgpu::TextureFormat format, const wgpu::Extent3D size,
+@@ -586,8 +587,18 @@ struct PresentPool {
+ std::array<PresentPool, FrameSlotCount> g_presentPools;
+ 
+ webgpu::TextureWithSampler g_xfb;
++webgpu::TextureWithSampler g_xfbRight; // VR stereo: the right eye's
+ 
+-const webgpu::TextureWithSampler& acquire_xfb(uint32_t width, uint32_t height, wgpu::TextureFormat format) {
++const webgpu::TextureWithSampler& acquire_xfb_in(webgpu::TextureWithSampler& g_xfb, uint32_t width, uint32_t height,
++                                                 wgpu::TextureFormat format);
++
++const webgpu::TextureWithSampler& acquire_xfb(uint32_t width, uint32_t height, wgpu::TextureFormat format,
++                                              bool right = false) {
++  return acquire_xfb_in(right ? g_xfbRight : g_xfb, width, height, format);
++}
++
++const webgpu::TextureWithSampler& acquire_xfb_in(webgpu::TextureWithSampler& g_xfb, uint32_t width, uint32_t height,
++                                                 wgpu::TextureFormat format) {
+   if (!g_xfb.texture || g_xfb.size.width != width || g_xfb.size.height != height || g_xfb.format != format) {
+     const wgpu::Extent3D size{width, height, 1};
+     const wgpu::TextureDescriptor desc{
+@@ -727,6 +738,10 @@ void record_xfb_present(imgui::DrawData drawData, wgpu::BindGroup rmlBindGroup,
+   }
+   auto request = record_present(efb.xfb, xfb_present_source(), resample, scaleY);
+   request.primary = true;
++  request.frame = current_frame();
++  if (webgpu::g_stereo) {
++    request.stereoRight = g_xfbRight.texture;
++  }
+   request.imguiDrawData = std::move(drawData);
+   request.rmlBindGroup = std::move(rmlBindGroup);
+   request.rmlOverlay = rmlOverlay;
+@@ -973,9 +988,10 @@ gx::DrawData* get_last_draw_command() {
+ 
+ Vec2<uint32_t> get_render_target_size() noexcept {
+   if (g_recorder.currentRenderPass < current_render_passes().size()) {
+-    const auto& size =
+-        current_render_passes()[g_recorder.currentRenderPass].colorAttachments[SceneColorAttachmentIndex].size;
+-    return {size.width, size.height};
++    const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
++    const auto& size = pass.colorAttachments[SceneColorAttachmentIndex].size;
++    // VR stereo: the game draws into one eye's half (the encoder repeats it in the other)
++    return {pass.stereo ? size.width / 2 : size.width, size.height};
+   }
+   const auto windowSize = window::get_window_size();
+   return {windowSize.fb_width, windowSize.fb_height};
+@@ -1032,7 +1048,10 @@ static bool push_clear_draw(ClipRect rect, bool clearColor, bool clearAlpha, boo
+ static void resume_pass_after_copy(const RenderPass& prevPass, ClipRect rect, bool clearColor, bool clearAlpha,
+                                    bool clearDepth, Vec4<float> clearColorValue, float clearDepthValue) {
+   const auto msaaSamples = prevPass.msaaSamples;
+-  const auto& targetSize = prevPass.colorAttachments[SceneColorAttachmentIndex].size;
++  auto targetSize = prevPass.colorAttachments[SceneColorAttachmentIndex].size;
++  if (prevPass.stereo) {
++    targetSize.width /= 2;  // (one eye's half: rects are in its pixels)
++  }
+   const auto left = std::clamp<int32_t>(rect.x, 0, static_cast<int32_t>(targetSize.width));
+   const auto top = std::clamp<int32_t>(rect.y, 0, static_cast<int32_t>(targetSize.height));
+   const auto right = std::clamp<int32_t>(rect.x + rect.width, left, static_cast<int32_t>(targetSize.width));
+@@ -1054,6 +1073,7 @@ static void resume_pass_after_copy(const RenderPass& prevPass, ClipRect rect, bo
+       .clearDepth = clearDepth && fullTarget,
+       .hasDepth = prevPass.hasDepth,
+       .hasStencil = prevPass.hasStencil,
++      .stereo = prevPass.stereo,
+   };
+   const bool fullColorClear = clearColor && clearAlpha && fullTarget;
+   for (uint32_t i = 0; i < newPass.colorAttachmentCount; ++i) {
+@@ -1106,9 +1126,10 @@ void copy_disp(ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+                float clearDepthValue, int32_t dstY, uint32_t xfbHeight) {
+   auto& prevPass = current_render_passes()[g_recorder.currentRenderPass];
+   const auto& color = prevPass.colorAttachments[SceneColorAttachmentIndex];
+-  const auto left = std::clamp<int32_t>(rect.x, 0, static_cast<int32_t>(color.size.width));
++  const auto eyeWidth = prevPass.stereo ? color.size.width / 2 : color.size.width;  // (VR stereo: the left eye's half)
++  const auto left = std::clamp<int32_t>(rect.x, 0, static_cast<int32_t>(eyeWidth));
+   const auto top = std::clamp<int32_t>(rect.y, 0, static_cast<int32_t>(color.size.height));
+-  const auto right = std::clamp<int32_t>(rect.x + rect.width, left, static_cast<int32_t>(color.size.width));
++  const auto right = std::clamp<int32_t>(rect.x + rect.width, left, static_cast<int32_t>(eyeWidth));
+   auto bottom = std::clamp<int32_t>(rect.y + rect.height, top, static_cast<int32_t>(color.size.height));
+   if (xfbHeight != 0) {
+     // Composed XFB: this copy fills lines [dstY, dstY + height) of an XFB xfbHeight tall.
+@@ -1120,6 +1141,9 @@ void copy_disp(ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
+   if (right > left && bottom > top) {
+     const auto height = xfbHeight != 0 ? xfbHeight : static_cast<uint32_t>(bottom - top);
+     prevPass.xfbDst = acquire_xfb(static_cast<uint32_t>(right - left), height, color.format).texture;
++    if (prevPass.stereo) {
++      prevPass.xfbDstRight = acquire_xfb(static_cast<uint32_t>(right - left), height, color.format, true).texture;
++    }
+     prevPass.xfbRect = {.x = left, .y = top, .width = right - left, .height = bottom - top};
+     prevPass.xfbDstY = static_cast<uint32_t>(dstY);
+   }
+diff --git a/lib/gfx/resources.hpp b/lib/gfx/resources.hpp
+index df3e4d2..c75f81c 100644
+--- a/lib/gfx/resources.hpp
++++ b/lib/gfx/resources.hpp
+@@ -7,7 +7,8 @@ inline constexpr bool UseTextureBuffer = true;
+ // Per frame (upstream: 24 / 5 / 2 / 8 MiB). Rogue Leader's Battle of Hoth intro starts with three
+ // game frames in one presented frame (~54,000 draws): uniforms 29 MiB, vertices 6, indices 3.2,
+ // storage 13.3. A draw that still does not fit is dropped (frame_has_room), not fatal.
+-inline constexpr uint64_t UniformBufferSize = 50331648; // 48 MiB
++// (VR stereo: three uniform blocks per perspective draw, mono and both eyes: 48 MiB filled up)
++inline constexpr uint64_t UniformBufferSize = 134217728; // 128 MiB
+ inline constexpr uint64_t VertexBufferSize = 10485760;   // 10 MiB
+ inline constexpr uint64_t IndexBufferSize = 5242880;     // 5 MiB
+ inline constexpr uint64_t StorageBufferSize = 20971520; // 20 MiB
+diff --git a/lib/gx/command_processor.cpp b/lib/gx/command_processor.cpp
+index 48c2e74..47218da 100644
+--- a/lib/gx/command_processor.cpp
++++ b/lib/gx/command_processor.cpp
+@@ -21,6 +21,7 @@
+ #include <atomic>
+ #include <bit>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstdint>
+ #include <cstring>
+ #include <span>
+@@ -169,6 +170,8 @@ struct DrawCache {
+   u8 lineMode = 0;
+   bool hasPipeline = false;
+   gfx::Range uniformRange{};
++  uint32_t uniformEyeStride = 0; // VR stereo: the eyes' blocks follow uniformRange
++  bool uniformHud = false;        // VR stereo: those are the HUD's (g_lastUniformHud)
+   gfx::Range fogRange{};
+   FogRangeLutKey fogRangeKey{};
+   bool hasFogRange = false;
+@@ -1070,6 +1073,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+   if (!uniformValid) {
+     cache.uniformRange = useUber ? build_uber_uniform(cache.config.shaderConfig, cache.shaderInfo)
+                                  : build_uniform(cache.shaderInfo);
++    cache.uniformEyeStride = g_lastUniformEyeStride;
++    cache.uniformHud = g_lastUniformHud;
+     cache.uniformUber = useUber;
+     cache.zFreezePlaneGen = state.zFreezePlaneGen;
+     cache.nbtCacheGen = state.nbtCacheGen;
+@@ -1102,6 +1107,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
+       .vertRange = vertRange,
+       .idxRange = idxRange,
+       .uniformRange = cache.uniformRange,
++      .uniformEyeStride = cache.uniformEyeStride,
++      .stereoHud = cache.uniformHud && cache.uniformEyeStride != 0,
+       .immediateData = immediates,
+       .vtxCount = vtxCount,
+       .indexCount = numIndices,
+@@ -1156,6 +1163,62 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader&
+   // extent: always.)
+   const bool unchanged = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && !g_gxState.fillScreen &&
+                          !is_screen_sprite(static_cast<GXPrimitive>(prim), vtxCount);
++  if (g_gxState.stereoOn) {
++    // VR stereo: 2D covering the whole frame, or a quad facing the camera that fills its view
++    // (the targeting computer's tint: a perspective quad just ahead) (GXState::stereoFullScreen)
++    bool full = false;
++    if (g_gxState.projType == GX_PERSPECTIVE && vtxCount <= 6) {
++      const auto& proj = g_gxState.proj;
++      const PosLayout layout = pos_layout(fmt);
++      float minX = 1e30f, maxX = -1e30f, minY = 1e30f, maxY = -1e30f, minZ = 1e30f, maxZ = -1e30f;
++      bool ok = true;
++      for (u32 i = 0; i < vtxCount && ok; ++i) {
++        Vec4<float> mv;
++        if (!vertex_mv_pos(layout, verts + i * vtxSize, mv) || !(mv[2] < 0.f)) {
++          ok = false;
++          break;
++        }
++        const float w = proj.m3[0] * mv[0] + proj.m3[1] * mv[1] + proj.m3[2] * mv[2] + proj.m3[3];
++        if (!(w > 0.f)) {
++          ok = false;
++          break;
++        }
++        const float x = (proj.m0[0] * mv[0] + proj.m0[1] * mv[1] + proj.m0[2] * mv[2] + proj.m0[3]) / w;
++        const float y = (proj.m1[0] * mv[0] + proj.m1[1] * mv[1] + proj.m1[2] * mv[2] + proj.m1[3]) / w;
++        minX = std::min(minX, x);
++        maxX = std::max(maxX, x);
++        minY = std::min(minY, y);
++        maxY = std::max(maxY, y);
++        minZ = std::min(minZ, mv[2]);
++        maxZ = std::max(maxZ, mv[2]);
++      }
++      full = ok && maxZ - minZ <= std::abs(maxZ) * 0.01f && minX <= -0.95f && maxX >= 0.95f && minY <= -0.95f &&
++             maxY >= 0.95f;
++    } else if (g_gxState.projType != GX_PERSPECTIVE) {
++      const auto& proj = g_gxState.proj;
++      const PosLayout layout = pos_layout(fmt);
++      float minX = 1e30f, maxX = -1e30f, minY = 1e30f, maxY = -1e30f;
++      bool ok = true;
++      for (u32 i = 0; i < vtxCount && ok; ++i) {
++        Vec4<float> mv;
++        if (!vertex_mv_pos(layout, verts + i * vtxSize, mv)) {
++          ok = false;
++          break;
++        }
++        const float x = proj.m0[0] * mv[0] + proj.m0[1] * mv[1] + proj.m0[2] * mv[2] + proj.m0[3];
++        const float y = proj.m1[0] * mv[0] + proj.m1[1] * mv[1] + proj.m1[2] * mv[2] + proj.m1[3];
++        minX = std::min(minX, x);
++        maxX = std::max(maxX, x);
++        minY = std::min(minY, y);
++        maxY = std::max(maxY, y);
++      }
++      full = ok && minX <= -0.95f && maxX >= 0.95f && minY <= -0.95f && maxY >= 0.95f;
++    }
++    if (full != g_gxState.stereoFullScreen) {
++      g_gxState.stereoFullScreen = full;
++      g_gxState.dirty |= DirtyUniform;
++    }
++  }
+   if (!unchanged) {
+     auto ps = widescreen_scale(fmt, verts, vtxCount, vtxSize, static_cast<GXPrimitive>(prim));
+     if (g_gxState.fillScreen) {
+@@ -1430,6 +1493,30 @@ void handle_aurora(ByteReader& reader) noexcept {
+   } else if (subCmd == GX_AURORA_LOAD_DISP_COPY_DST) {
+     g_gxState.dispCopyDstY = reader.read<s32>();
+     g_gxState.xfbHeight = reader.read<u32>();
++  } else if (subCmd == GX_AURORA_SET_STEREO_VIEWS) {
++    const bool on = reader.read<u8>() != 0;
++    g_gxState.stereoOn = on;
++    if (on) {
++      for (auto& eye : g_gxState.stereoEyes) {
++        for (float& t : eye.tan) {
++          t = reader.read<f32>();
++        }
++        for (float& v : eye.view) {
++          v = reader.read<f32>();
++        }
++      }
++    }
++    g_gxState.dirty |= DirtyUniform;
++    {
++      static int lastMode = -1;
++      const int mode = !on ? 0 : g_gxState.stereoEyes[0].tan[0] == 0.f && g_gxState.stereoEyes[0].tan[1] == 0.f ? 2 : 1;
++      if (mode != lastMode) {
++        lastMode = mode;
++        const auto& e = g_gxState.stereoEyes;
++        Log.info("stereo views: {} (eye x {} / {}, screen at {})", mode == 0 ? "off" : mode == 1 ? "headset" : "3D screen",
++                 -e[0].view[3], -e[1].view[3], e[0].tan[2]);
++      }
++    }
+   } else if (subCmd == GX_AURORA_SET_SCREEN_SPACE_2D) {
+     const bool on = reader.read<u8>() != 0;
+     if (on != g_gxState.screenSpace2D) {
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index 3a8c9db..4fe3fa3 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -25,6 +25,9 @@
+ static aurora::Module Log("aurora::gx");
+ 
+ namespace aurora::gx {
++int g_stereoDrawEye = -1;
++uint32_t g_lastUniformEyeStride = 0;
++bool g_lastUniformHud = false;
+ using webgpu::g_device;
+ using webgpu::g_graphicsConfig;
+ 
+diff --git a/lib/gx/gx.hpp b/lib/gx/gx.hpp
+index c8f10d0..b73ddc3 100644
+--- a/lib/gx/gx.hpp
++++ b/lib/gx/gx.hpp
+@@ -330,6 +330,7 @@ struct GXState {
+     u32 height = 0;
+     GXPixelFmt pixelFormat = GX_PF_RGB8_Z24;
+     uint64_t frame = 0; // texture::frame_count() when the whole texture was last copied
++    bool wholeFrame = false; // copied from (about) the whole frame (VR stereo: shown as copied)
+ 
+     operator bool() const noexcept { return handle.operator bool(); }
+   };
+@@ -393,11 +394,22 @@ struct GXState {
+   float projYAdd = 0.f;         // NDC shift in y (screen-position sprites), after the scales
+   // Widescreen HUD: 2D pieces clearly on one side move to that edge (AuroraSetHudAnchoring).
+   bool hudAnchoring = false;
++  // GX_AURORA_SET_STEREO_VIEWS: the eyes' frustums and views (VR); stereoBuildEye is the eye
++  // a uniform block is being built for (-1: the game's own projection)
++  bool stereoOn = false;
++  struct StereoEye {
++    float tan[4]; // left, right, down, up
++    float view[12];
++  } stereoEyes[2]{};
++  int stereoBuildEye = -1;
+   // GX_AURORA_SET_SCREEN_SPACE_2D: orthographic draws in the target's own screen space
+   bool screenSpace2D = false;
+   // GX_AURORA_SET_FILL_SCREEN: draws stretched out to the target's edges, and the NDC shift
+   // their projection carries
+   bool fillScreen = false;
++  // VR stereo: this draw covers the whole frame (2D: a fade; or a quad facing the camera, the
++  // targeting computer's tint): drawn over the whole eye as the game drew it (command_processor.cpp)
++  bool stereoFullScreen = false;
+   float fillShiftX = 0.f, fillShiftY = 0.f;
+   // AuroraSetWidenedAspects: perspective aspects the game already widened for the target
+   std::array<float, 8> widenedAspects{};
+@@ -476,6 +488,14 @@ struct GXState {
+   void clearVtxSizeCache() { lastVtxFmt = GX_MAX_VTXFMT; }
+ };
+ extern GXState g_gxState;
++// VR stereo: the eye whose half of the EFB the render worker is encoding (-1: not a stereo
++// pass), and the stride between a draw's uniform blocks (mono, left, right) the last
++// build_uniform / build_uber_uniform pushed (0: one block, the same for both eyes)
++extern int g_stereoDrawEye;
++extern uint32_t g_lastUniformEyeStride;
++// ... and whether its eye blocks are the HUD's (stereo_hud_projection: the draw takes the whole
++// eye as its viewport and scissor, its own placement being in the projection)
++extern bool g_lastUniformHud;
+ 
+ // Widescreen: the per-draw projection scales (see widescreen_scale in command_processor.cpp)
+ // applied to a projection as the vertex shader receives it.
+diff --git a/lib/gx/pipeline.cpp b/lib/gx/pipeline.cpp
+index c42d221..d6f679d 100644
+--- a/lib/gx/pipeline.cpp
++++ b/lib/gx/pipeline.cpp
+@@ -11,9 +11,14 @@
+ 
+ #include <tracy/Tracy.hpp>
+ 
++#include "../internal.hpp"
++
+ #include <atomic>
+ 
+ namespace aurora::gx {
++namespace {
++constexpr Module Log{"aurora::gx::stereo"};
++}
+ 
+ gfx::CompiledPipeline create_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout) {
+   ZoneScoped;
+@@ -69,7 +74,21 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+   }
+   const auto& resources = gfx::detail::resources();
+   pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
+-  const std::array offsets{data.uniformRange.offset};
++  const uint32_t eyeOffset =
++      g_stereoDrawEye >= 0 ? data.uniformEyeStride * static_cast<uint32_t>(g_stereoDrawEye + 1) : 0;
++  {
++    // VR stereo diagnostics: left-eye draws in stereo passes, and how many had eye blocks
++    static uint64_t eyeDraws = 0, eyeBlocks = 0, calls = 0;
++    if (g_stereoDrawEye == 0) {
++      ++eyeDraws;
++      eyeBlocks += data.uniformEyeStride != 0;
++    }
++    if (++calls % 2000000 == 0 && eyeDraws != 0) {
++      Log.info("stereo: {} of {} left-eye draws took eye blocks", eyeBlocks, eyeDraws);
++      eyeDraws = eyeBlocks = 0;
++    }
++  }
++  const std::array offsets{data.uniformRange.offset + eyeOffset};
+   pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
+   if (data.bindGroups.textureBindGroup) {
+     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
+@@ -86,12 +105,19 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+       pass.DrawIndexed(data.indexCount, data.instanceCount);
+     }
+   };
++  const bool hud = data.stereoHud && g_stereoDrawEye >= 0;
++  if (hud) {
++    gfx::stereo_hud_viewport(pass, true);
++  }
+   if (pipeline.prepass) {
+     gfx::bind_pipeline(pipeline.prepass, pass);
+     draw();
+   }
+   gfx::bind_pipeline(pipeline.main, pass);
+   draw();
++  if (hud) {
++    gfx::stereo_hud_viewport(pass, false);
++  }
+ }
+ 
+ } // namespace aurora::gx
+diff --git a/lib/gx/pipeline.hpp b/lib/gx/pipeline.hpp
+index 26664d2..ff6f01d 100644
+--- a/lib/gx/pipeline.hpp
++++ b/lib/gx/pipeline.hpp
+@@ -10,6 +10,8 @@ struct DrawData {
+   gfx::Range vertRange;
+   gfx::Range idxRange;
+   gfx::Range uniformRange;
++  uint32_t uniformEyeStride = 0; // VR stereo: left eye's block at +stride, right's at +2 stride
++  bool stereoHud = false;         // VR stereo: the eye blocks are the HUD's (the whole eye as viewport)
+   DrawImmediateData immediateData;
+   uint32_t vtxCount;
+   uint32_t indexCount;
+diff --git a/lib/gx/shader_info.cpp b/lib/gx/shader_info.cpp
+index bebf090..99009dc 100644
+--- a/lib/gx/shader_info.cpp
++++ b/lib/gx/shader_info.cpp
+@@ -1,8 +1,10 @@
+ #include "shader_info.hpp"
+ 
+ #include "../gfx/recording.hpp"
++#include "texture.hpp"
+ #include "uber.hpp"
+ 
++#include <array>
+ #include <atomic>
+ #include <cmath>
+ #include <cstddef>
+@@ -491,6 +493,224 @@ void validate_shader_config(const ShaderConfig& config, const ShaderInfo& info,
+   }
+ }
+ 
++// VR stereo: a perspective draw's projection for one eye. x and y come from the eye's frustum
++// (clip x = (2 x + (tanR + tanL) z) / (tanR - tanL), w = -z), z and w from the game's own
++// projection (its depth stays as it was), all applied to the view-space position moved into
++// the eye's space (view: 3x4 rows).
++//
++// Games draw a frame in pieces (Rogue Leader: a top and a bottom band, each with a viewport of
++// its height and an off-center frustum: x = p0 t - p1, y = p2 t - p3 for t = view tangent).
++// The eye's frustum stands for the whole frame, and each piece takes the same part of it the
++// game's took: scaled by frame / viewport size and moved by the game's own off-center term
++// (k, off below; 1 and 0 for a draw over the whole frame).
++struct StereoFit {
++  float kx = 1.f, ky = 1.f, offX = 0.f, offY = 0.f;
++};
++
++static Mat4x4<float> stereo_projection(const Mat4x4<float>& game, const GXState::StereoEye& eye,
++                                       const StereoFit& fit) noexcept {
++  const float tl = eye.tan[0], tr = eye.tan[1], td = eye.tan[2], tu = eye.tan[3];
++  const float q[4][4] = {
++      {fit.kx * 2.f / (tr - tl), 0.f, fit.kx * (tr + tl) / (tr - tl) + fit.offX, 0.f},
++      {0.f, fit.ky * 2.f / (tu - td), fit.ky * (tu + td) / (tu - td) + fit.offY, 0.f},
++      {game.m2[0], game.m2[1], game.m2[2], game.m2[3]},
++      {game.m3[0], game.m3[1], game.m3[2], game.m3[3]},
++  };
++  const float m[4][4] = {
++      {eye.view[0], eye.view[1], eye.view[2], eye.view[3]},
++      {eye.view[4], eye.view[5], eye.view[6], eye.view[7]},
++      {eye.view[8], eye.view[9], eye.view[10], eye.view[11]},
++      {0.f, 0.f, 0.f, 1.f},
++  };
++  Mat4x4<float> out{};
++  Vec4<float>* rows[4] = {&out.m0, &out.m1, &out.m2, &out.m3};
++  for (int i = 0; i < 4; ++i) {
++    for (int j = 0; j < 4; ++j) {
++      float v = 0.f;
++      for (int k = 0; k < 4; ++k) {
++        v += q[i][k] * m[k][j];
++      }
++      (*rows[i])[j] = v;
++    }
++  }
++  return out;
++}
++
++// How this draw's viewport and frustum sit in the frame (stereo_projection). False: a 3D view
++// in a window of its own (a centered frustum in a smaller viewport): it keeps the game's view.
++static bool stereo_fit(const Mat4x4<float>& game, StereoFit& fit) noexcept {
++  const auto [fbWidth, fbHeight] = logical_fb_size();
++  const auto& vp = g_gxState.logicalViewport;
++  // (a composed XFB: the frame is the XFB's lines, drawn a band at a time)
++  const float frameH = g_gxState.xfbHeight != 0 ? static_cast<float>(g_gxState.xfbHeight) : static_cast<float>(fbHeight);
++  const float frameW = static_cast<float>(fbWidth);
++  if (vp.width < 1.f || vp.height < 1.f || frameW < 1.f || frameH < 1.f) {
++    return true;
++  }
++  fit.kx = std::max(frameW / vp.width, 1.f);
++  fit.ky = std::max(frameH / vp.height, 1.f);
++  fit.offX = game.m0[2];
++  fit.offY = game.m1[2];
++  // a band of the frame spans its width or its height; smaller both ways it is a window of
++  // its own (the radar: an off-center frustum in a corner of the screen)
++  if (fit.kx > 1.05f && fit.ky > 1.05f) {
++    return false;
++  }
++  const bool centered = std::abs(fit.offX) < 1e-3f && std::abs(fit.offY) < 1e-3f;
++  const bool whole = fit.kx <= 1.05f && fit.ky <= 1.05f;
++  if (centered) {
++    if (!whole) {
++      return false;
++    }
++    fit.kx = fit.ky = 1.f;
++    return true;
++  }
++  // off-center over the whole frame: not a band, a view the game moved on the screen (the
++  // radar, the craft's wireframe in a corner)
++  return !whole;
++}
++
++// A 3D screen (tan left = right = 0; tan[2]: the screen's distance in game units): the game's
++// own x/y projection from each eye's place beside the camera (view: a translation), moved so
++// that what lies at the screen's distance shows at the same place for both eyes (in front of it
++// before the screen, behind it after).
++static Mat4x4<float> screen_projection(const Mat4x4<float>& game, const GXState::StereoEye& eye) noexcept {
++  const float eyeX = -eye.view[3];  // (the eye's x in the camera's space)
++  const float screen = std::max(eye.tan[2], 1e-3f);
++  Mat4x4<float> out = game;
++  // translation: v' = v - eye, so the x/y/z/w rows pick up -row . eye
++  const float t[3] = {eye.view[3], eye.view[7], eye.view[11]};
++  Vec4<float>* rows[4] = {&out.m0, &out.m1, &out.m2, &out.m3};
++  for (auto* row : rows) {
++    (*row)[3] += (*row)[0] * t[0] + (*row)[1] * t[1] + (*row)[2] * t[2];
++  }
++  // zero parallax at the screen: ndc x += p0 * eyeX / screen (clip: the w term, w = -z)
++  const float shift = game.m0[0] * eyeX / screen;
++  out.m0 = out.m0 + out.m3 * Vec4{shift, shift, shift, shift};
++  return out;
++}
++
++static bool screen_mode() noexcept {
++  return g_gxState.stereoEyes[0].tan[0] == 0.f && g_gxState.stereoEyes[0].tan[1] == 0.f;
++}
++
++// VR stereo: draws that are drawn as the game drew them, in each eye alike. Rendering a texture
++// (a viewport that is the source of a texture copy narrower than the frame: Rogue Leader's
++// shadow maps, the craft's silhouette; laid on the HUD's plane it showed as a black craft over
++// the whole eye); and showing a copy of the whole frame (the targeting computer's tinted view:
++// the copy holds the eye's picture as it is, on the HUD's plane it showed shrunk); and 2D over the
++// whole frame or a quad facing the camera that fills its view (GXState::stereoFullScreen: the
++// targeting computer's tint, a perspective quad just ahead, filled only the game's view).
++static bool stereo_mono_draw() noexcept {
++  if (g_gxState.stereoFullScreen) {
++    return true;
++  }
++  const auto& vp = g_gxState.logicalViewport;
++  const float frameW = static_cast<float>(logical_fb_size().x);
++  if (vp.width < frameW * 0.9f) {
++    for (const auto& r : g_gxState.rttRects) {
++      if (r.width > 0 && std::abs(vp.left - static_cast<float>(r.x)) <= 2.f &&
++          std::abs(vp.top - static_cast<float>(r.y)) <= 2.f && std::abs(vp.width - static_cast<float>(r.width)) <= 2.f &&
++          std::abs(vp.height - static_cast<float>(r.height)) <= 2.f) {
++        return true;
++      }
++    }
++    return false;
++  }
++  const uint64_t frame = texture::frame_count();
++  for (u32 i = 0; i < g_gxState.numTevStages && i < g_gxState.tevStages.size(); ++i) {
++    const auto id = g_gxState.tevStages[i].texMapId;
++    if (id == GX_TEXMAP_NULL || static_cast<u32>(id) >= g_gxState.loadedTextures.size()) {
++      continue;
++    }
++    const auto it = g_gxState.copyTextures.find(g_gxState.loadedTextures[id].data);
++    if (it != g_gxState.copyTextures.end() && it->second && it->second.wholeFrame && it->second.frame + 1 >= frame) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// VR stereo with the headset's views: the 2D draws too (stereo_hud_projection); on the 3D
++// screen only the game's 3D (2D lies on the screen as it is)
++static bool stereo_draw() noexcept {
++  return g_gxState.stereoOn && (g_gxState.projType == GX_PERSPECTIVE || !screen_mode()) && !stereo_mono_draw();
++}
++
++// The HUD's plane (stereo_hud_projection): its distance ahead of the camera, and the game's
++// frame as view tangents (half width, half height), from its latest 3D draw
++std::atomic<float> g_hudDistance{10.f};
++std::atomic<float> g_hudOffset{0.f};  // the eyes ahead of the camera (set_stereo_hud_offset)
++float g_frameTan[2] = {0.75f, 0.5625f};
++std::atomic<float> g_frameTanSet[2] = {0.f, 0.f};  // (set_stereo_frame_tan)
++
++// The 2D draws (the HUD) and 3D views in windows of their own, with the headset's views: what
++// the game shows at a point of its frame lies on a plane g_hudDistance ahead of its camera,
++// spanning the game's view (g_frameTan), seen from each eye like the world: the HUD stays where
++// the game put it in its view (the reticle over the aim point) when the head turns, and stands
++// at that distance instead of infinitely far. The draw takes the whole eye as its viewport and
++// scissor (pipeline.cpp): moved with the head it would leave a small one.
++static Mat4x4<float> stereo_hud_projection(const Mat4x4<float>& game, const GXState::StereoEye& eye) noexcept {
++  const auto [fbWidth, fbHeight] = logical_fb_size();
++  const auto& vp = g_gxState.logicalViewport;
++  const float frameH = g_gxState.xfbHeight != 0 ? static_cast<float>(g_gxState.xfbHeight) : static_cast<float>(fbHeight);
++  const float frameW = static_cast<float>(fbWidth);
++  float ax = 1.f, bx = 0.f, ay = 1.f, by = 0.f;  // the viewport's NDC -> the frame's
++  if (vp.width >= 1.f && vp.height >= 1.f && frameW >= 1.f && frameH >= 1.f) {
++    ax = vp.width / frameW;
++    bx = (2.f * vp.left + vp.width) / frameW - 1.f;
++    ay = vp.height / frameH;
++    by = 1.f - (2.f * vp.top + vp.height) / frameH;
++  }
++  const float d = std::max(g_hudDistance.load(std::memory_order_relaxed), 0.01f);
++  const float tl = eye.tan[0], tr = eye.tan[1], td = eye.tan[2], tu = eye.tan[3];
++  using M4 = std::array<std::array<float, 4>, 4>;
++  auto mul = [](const M4& a, const M4& b) {
++    M4 o{};
++    for (int i = 0; i < 4; ++i)
++      for (int j = 0; j < 4; ++j)
++        for (int k = 0; k < 4; ++k)
++          o[i][j] += a[i][k] * b[k][j];
++    return o;
++  };
++  M4 g{};
++  const Vec4<float>* gr[4] = {&game.m0, &game.m1, &game.m2, &game.m3};
++  for (int i = 0; i < 4; ++i)
++    for (int j = 0; j < 4; ++j)
++      g[i][j] = (*gr[i])[j];
++  // the game's clip -> the frame's (homogeneous), -> the plane's point in the camera's space
++  const M4 frame{{{ax, 0.f, 0.f, bx}, {0.f, ay, 0.f, by}, {0.f, 0.f, 1.f, 0.f}, {0.f, 0.f, 0.f, 1.f}}};
++  const float setW = g_frameTanSet[0].load(std::memory_order_relaxed);
++  const float setH = g_frameTanSet[1].load(std::memory_order_relaxed);
++  const float tw = setW > 0.f ? setW : g_frameTan[0], th = setH > 0.f ? setH : g_frameTan[1];
++  const M4 plane{{{d * tw, 0.f, 0.f, 0.f},
++                  {0.f, d * th, 0.f, 0.f},
++                  {0.f, 0.f, 0.f, -(d + g_hudOffset.load(std::memory_order_relaxed))},
++                  {0.f, 0.f, 0.f, 1.f}}};
++  const M4 view{{{eye.view[0], eye.view[1], eye.view[2], eye.view[3]},
++                 {eye.view[4], eye.view[5], eye.view[6], eye.view[7]},
++                 {eye.view[8], eye.view[9], eye.view[10], eye.view[11]},
++                 {0.f, 0.f, 0.f, 1.f}}};
++  // the eye's projection (x, y; w = -z)
++  const M4 proj{{{2.f / (tr - tl), 0.f, (tr + tl) / (tr - tl), 0.f},
++                 {0.f, 2.f / (tu - td), (tu + td) / (tu - td), 0.f},
++                 {0.f, 0.f, 0.f, 0.f},
++                 {0.f, 0.f, -1.f, 0.f}}};
++  const M4 m = mul(proj, mul(view, mul(plane, mul(frame, g))));
++  g_lastUniformHud = true;
++  Mat4x4<float> out{};
++  Vec4<float>* rows[4] = {&out.m0, &out.m1, &out.m2, &out.m3};
++  for (int i = 0; i < 4; ++i)
++    for (int j = 0; j < 4; ++j)
++      (*rows[i])[j] = m[i][j];
++  // depth: the game's, over the plane's w (d times the game's when looking straight at it). The
++  // plane seen at an angle (the head turned) has a smaller w, which pushed the HUD's depth (near
++  // 1) past the far end of the range and its pieces out: half of it, which stays inside up to
++  // 60 degrees off the plane's normal.
++  out.m2 = game.m2 * Vec4{d * 0.5f, d * 0.5f, d * 0.5f, d * 0.5f};
++  return out;
++}
++
+ static Mat4x4<float> draw_projection() noexcept {
+   auto proj = g_gxState.proj;
+   if constexpr (UseReversedZ) {
+@@ -498,6 +718,21 @@ static Mat4x4<float> draw_projection() noexcept {
+   } else {
+     proj.m2 = proj.m2 + proj.m3;
+   }
++  if (const int eye = g_gxState.stereoBuildEye; eye >= 0 && stereo_draw()) {
++    if (const auto& e = g_gxState.stereoEyes[eye]; e.tan[0] == 0.f && e.tan[1] == 0.f) {
++      apply_widescreen_scale(proj);
++      return screen_projection(proj, e);
++    }
++    if (StereoFit fit; g_gxState.projType == GX_PERSPECTIVE && stereo_fit(proj, fit)) {
++      // (the frame as the game sees it, for the HUD's plane)
++      if (std::abs(proj.m0[0]) > 1e-4f && std::abs(proj.m1[1]) > 1e-4f) {
++        g_frameTan[0] = fit.kx / std::abs(proj.m0[0]);
++        g_frameTan[1] = fit.ky / std::abs(proj.m1[1]);
++      }
++      return stereo_projection(proj, g_gxState.stereoEyes[eye], fit);
++    }
++    return stereo_hud_projection(proj, g_gxState.stereoEyes[eye]);
++  }
+   apply_widescreen_scale(proj);
+   return proj;
+ }
+@@ -644,12 +879,36 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
+   }
+ }
+ 
++// VR stereo: a perspective draw gets three blocks one after another, the same size: the game's
++// own projection (offscreen passes), then the left and the right eye's (the EFB's halves).
++template <typename Push>
++static gfx::Range push_stereo_blocks(const Push& push) noexcept {
++  g_lastUniformEyeStride = 0;
++  g_lastUniformHud = false;
++  if (!stereo_draw()) {
++    return push();
++  }
++  g_gxState.stereoBuildEye = -1;
++  const auto mono = push();
++  g_gxState.stereoBuildEye = 0;
++  const auto left = push();
++  g_gxState.stereoBuildEye = 1;
++  const auto right = push();
++  g_gxState.stereoBuildEye = -1;
++  if (left.offset > mono.offset && right.offset - left.offset == left.offset - mono.offset) {
++    g_lastUniformEyeStride = left.offset - mono.offset;
++  }
++  return mono;
++}
++
+ gfx::Range build_uniform(const ShaderInfo& info) noexcept {
+   ZoneScoped;
+   static ByteBuffer buf;
+-  buf.clear();
+-  fill_uniform(buf, info);
+-  return gfx::push_uniform(buf.data(), buf.size());
++  return push_stereo_blocks([&] {
++    buf.clear();
++    fill_uniform(buf, info);
++    return gfx::push_uniform(buf.data(), buf.size());
++  });
+ }
+ 
+ namespace {
+@@ -954,6 +1213,22 @@ gfx::Range build_uber_uniform(const ShaderConfig& config, const ShaderInfo& info
+   u.flags[3] |= static_cast<u32>(config.attrs[GX_VA_NRM].attrType != GX_NONE) << 7;
+   u.nbtCache[0] = g_gxState.nbtCache[0];
+   u.nbtCache[1] = g_gxState.nbtCache[1];
+-  return gfx::push_uniform(reinterpret_cast<const u8*>(&u), sizeof(u));
++  return push_stereo_blocks([&] {
++    u.proj = draw_projection();
++    return gfx::push_uniform(reinterpret_cast<const u8*>(&u), sizeof(u));
++  });
+ }
+ } // namespace aurora::gx
++
++void aurora::gfx::set_stereo_hud_offset(float forward) noexcept {
++  aurora::gx::g_hudOffset.store(forward, std::memory_order_relaxed);
++}
++
++void aurora::gfx::set_stereo_hud_distance(float distance) noexcept {
++  aurora::gx::g_hudDistance.store(distance, std::memory_order_relaxed);
++}
++
++void aurora::gfx::set_stereo_frame_tan(float halfWidth, float halfHeight) noexcept {
++  aurora::gx::g_frameTanSet[0].store(halfWidth, std::memory_order_relaxed);
++  aurora::gx::g_frameTanSet[1].store(halfHeight, std::memory_order_relaxed);
++}
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index 05664e3..04526d3 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -69,6 +69,7 @@ static std::atomic_bool g_initialized = false;
+ static std::atomic_bool g_vsyncEnabled = true;
+ // OpenXR: the headset's adapter (aurora::gfx::set_adapter_luid)
+ bool g_adapterLuidSet = false;
++bool g_stereo = false;
+ static uint32_t g_adapterLuidLow = 0;
+ static int32_t g_adapterLuidHigh = 0;
+ 
+@@ -1087,6 +1088,9 @@ void shutdown() {
+ }
+ 
+ void resize_efb(uint32_t width, uint32_t height) {
++  if (g_stereo) {
++    width *= 2;  // VR stereo: the left eye in the left half, the right eye in the right half
++  }
+   if (!g_device || !width || !height ||
+       (g_frameBuffer.size.width == width && g_frameBuffer.size.height == height && g_frameBuffer.view)) {
+     return;
+@@ -1105,6 +1109,8 @@ void aurora_enable_vsync(const bool enabled) {
+   aurora::gfx::present::set_vsync(enabled);
+ }
+ 
++void aurora::gfx::set_stereo(bool enabled) noexcept { aurora::webgpu::g_stereo = enabled; }
++
+ void aurora::gfx::set_adapter_luid(uint32_t lowPart, int32_t highPart) noexcept {
+   aurora::webgpu::g_adapterLuidLow = lowPart;
+   aurora::webgpu::g_adapterLuidHigh = highPart;
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index 169f47e..11495ed 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -61,7 +61,8 @@ extern bool g_textureComponentSwizzleSupported;
+ extern bool g_dualSourceBlendingSupported;
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
+-extern bool g_adapterLuidSet;  // OpenXR (red_two): aurora::gfx::set_adapter_luid was called
++extern bool g_adapterLuidSet;
++extern bool g_stereo;  // VR stereo (aurora::gfx::set_stereo): the EFB textures are two eyes wide  // OpenXR (red_two): aurora::gfx::set_adapter_luid was called
+ void shutdown();
+ void resize_efb(uint32_t width, uint32_t height);
+ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);

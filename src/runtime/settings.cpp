@@ -75,6 +75,18 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "background_audio") s.backgroundAudio = parseBool(value);
     else if (key == "check_updates") s.checkUpdates = parseBool(value);
     else if (key == "discord_presence") s.discordPresence = parseBool(value);
+    else if (key == "xr_world_scale") s.xrWorldScale = std::clamp(float(atof(value.c_str())), 0.05f, 1000.f);
+    else if (key == "xr_hud_distance") s.xrHudDistance = std::clamp(float(atof(value.c_str())), 0.5f, 1000.f);
+    else if (key == "language") s.language = value == "es" ? 1 : 0;
+    else if (key == "game_language") s.gameLanguage = value == "es" ? 1 : 0;
+    else if (key == "spanish_disc_path") s.spanishDiscPath = value;
+    else if (key == "xr_refresh_rate") s.xrRefreshRate = std::clamp(n, 0, 240);
+    else if (key == "xr_stereo") s.xrStereo = parseBool(value);
+    else if (key == "vr") s.vr = parseBool(value);
+    else if (key == "xr_view_range") s.xrViewRange = std::clamp(n, 1, 12);
+    else if (key == "xr_screen_width") s.xrScreenWidth = std::clamp(float(atof(value.c_str())), 0.5f, 20.f);
+    else if (key == "xr_screen_depth") s.xrScreenDepth = std::clamp(float(atof(value.c_str())), 0.f, 5000.f);
+    else if (key == "xr_camera_forward") s.xrCameraForward = std::clamp(float(atof(value.c_str())), -200.f, 200.f);
     else if (key == "speakers") {
         for (int i = 0; i < int(Speakers::Count); i++)
             if (value == speakersName(Speakers(i))) s.speakers = Speakers(i);
@@ -114,6 +126,8 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "gyro_speed_x") s.gyroSpeedX = std::clamp(n, kGyroSpeedMin, kGyroSpeedMax);
     else if (key == "gyro_speed_y") s.gyroSpeedY = std::clamp(n, kGyroSpeedMin, kGyroSpeedMax);
     else if (key == "gyro_invert_y") s.gyroInvertY = parseBool(value);
+    else if (key == "stick_invert_y") s.stickInvertY = parseBool(value);
+    else if (key == "targeting_toggle") s.targetingToggle = parseBool(value);
     else if (key == "state_slot") s.stateSlot = n < 1 ? 1 : n > 8 ? 8 : n;
     else {
         for (int a = 0; a < HkCount; a++) {
@@ -258,6 +272,29 @@ void save() {
     fprintf(f, "check_updates=%d\n", s.checkUpdates);
     fprintf(f, "# Discord Rich Presence: your Discord profile shows the mission (through the Discord app on this PC)\n");
     fprintf(f, "discord_presence=%d\n", s.discordPresence);
+    fprintf(f, "# VR (--xr) stereo 3D: game units per metre (more: stronger depth) and the eyes' distance ahead of the\n");
+    fprintf(f, "# game's camera in metres; in the headset: hold the right grip and move the right thumbstick\n");
+    fprintf(f, "xr_world_scale=%g\n", s.xrWorldScale);
+    fprintf(f, "xr_camera_forward=%g\n", s.xrCameraForward);
+    fprintf(f, "# VR: depth of the 3D screen (hangar, cinematics); in the headset: right grip + right thumbstick left/right\n");
+    fprintf(f, "xr_screen_depth=%g\n", s.xrScreenDepth);
+    fprintf(f, "# VR: in flight, the HUD's distance ahead of the camera (game units; more: farther)\n");
+    fprintf(f, "xr_hud_distance=%g\n", s.xrHudDistance);
+    fprintf(f, "# VR: start in the headset (OpenXR), as with --xr (--no-xr: on the monitor anyway)\n");
+    fprintf(f, "vr=%d\n", s.vr);
+    fprintf(f, "# VR: the headset's refresh rate (0: the runtime's own; 72, 80, 90, 120 Hz); the game keeps its own fps\n");
+    fprintf(f, "xr_refresh_rate=%d\n", s.xrRefreshRate);
+    fprintf(f, "# the menu's language: en (English) or es (Spanish)\n");
+    fprintf(f, "language=%s\n", s.language == 1 ? "es" : "en");
+    fprintf(f, "# the game's texts, menus and voices: en, or es (needs the Spanish disc, GSWS64, beside the USA one or at spanish_disc_path)\n");
+    fprintf(f, "game_language=%s\n", s.gameLanguage == 1 ? "es" : "en");
+    fprintf(f, "spanish_disc_path=%s\n", s.spanishDiscPath.c_str());
+    fprintf(f, "# VR: stereo 3D in flight (0: a flat virtual screen all the time)\n");
+    fprintf(f, "xr_stereo=%d\n", s.xrStereo);
+    fprintf(f, "# VR: in flight, how far round the game's view the world is drawn (times; more: no ground missing)\n");
+    fprintf(f, "xr_view_range=%d\n", s.xrViewRange);
+    fprintf(f, "# VR: the flat virtual screen's width in metres (2.5 m away)\n");
+    fprintf(f, "xr_screen_width=%g\n", s.xrScreenWidth);
     fprintf(f, "# auto (the system's speaker setup), stereo (Pro Logic II matrix-encoded), 5.1 or 7.1\n");
     fprintf(f, "speakers=%s\n", speakersName(s.speakers));
     fprintf(f, "skip_logos=%d\n", s.skipLogos);
@@ -286,6 +323,10 @@ void save() {
     fprintf(f, "cstick_sensitivity=%d\n", s.cStickSensitivity);
     fprintf(f, "# how turning follows the control stick: smooth, linear or gamecube (the game's own curve)\n");
     fprintf(f, "stick_curve=%s\n", stickCurveName(s.stickCurve));
+    fprintf(f, "# in flight, the control stick's up / down reversed (1: forward climbs); the menus keep it\n");
+    fprintf(f, "stick_invert_y=%d\n", s.stickInvertY);
+    fprintf(f, "# in flight Y (the targeting computer) toggles on / off (0: shown while held)\n");
+    fprintf(f, "targeting_toggle=%d\n", s.targetingToggle);
     fprintf(f, "# gyro aiming in flight: 0 off, 1 always, 2 while the button is held, 3 the button toggles it, 4 off while held\n");
     fprintf(f, "gyro=%d\n", int(s.gyroMode));
     fprintf(f, "# the triggers' clicks (full boost / brake) on LB / RB, the triggers analog only, Z on the right stick click\n");

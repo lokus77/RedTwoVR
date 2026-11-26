@@ -12,6 +12,7 @@
 // The look: a holo-display over a starfield - a chamfered navy panel with glowing gold edges,
 // corner brackets and scanlines, Star Wars crawl gold for titles, the radar's amber for
 // highlights, Bahnschrift (Windows' DIN-style face) for type.
+#include "gfx/xr.h"
 #include "gx_bridge.h"
 
 #include <SDL3/SDL_dialog.h>
@@ -43,6 +44,8 @@
 #include <future>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "../hotkeys.h"
@@ -122,14 +125,44 @@ void applyStyle() {
 }
 
 // text with letter spacing (tracking) and an optional glow, at a size in pixels
+// The menu's language (setting language): English as written here, or its Spanish from
+// menu_es.inc (a text it has no entry for stays English)
+const char* loc(const char* en) {
+    if (!en || settings::get().language != 1) return en;
+    static const std::unordered_map<std::string_view, const char*> es = [] {
+        static const std::pair<const char*, const char*> table[] = {
+#include "gfx/menu_es.inc"
+        };
+        std::unordered_map<std::string_view, const char*> m;
+        for (const auto& [k, v] : table) m.emplace(k, v);
+        return m;
+    }();
+    const auto it = es.find(en);
+    return it != es.end() ? it->second : en;
+}
+std::string loc(const std::string& en) { return loc(en.c_str()); }
+
+// the bytes of the UTF-8 character starting at s (the Spanish menu's accents)
+int utf8Len(const char* s) {
+    const unsigned char c = static_cast<unsigned char>(*s);
+    const int n = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
+    for (int i = 1; i < n; i++)
+        if (!s[i]) return i;
+    return n;
+}
+
 void drawText(ImDrawList* dl, ImFont* font, float px, ImVec2 at, ImU32 col, const char* text, float tracking = 0.f,
               ImU32 glow = 0) {
     if (!font) font = ImGui::GetFont();
+    text = loc(text);
     auto pass = [&](ImVec2 p, ImU32 c) {
-        for (const char* s = text; *s; s++) {
-            const char buf[2] = {*s, 0};
+        for (const char* s = text; *s;) {
+            const int n = utf8Len(s);
+            char buf[5] = {};
+            memcpy(buf, s, size_t(n));
             dl->AddText(font, px, p, c, buf);
             p.x += font->CalcTextSizeA(px, FLT_MAX, 0.f, buf).x + tracking;
+            s += n;
         }
     };
     if (glow) {
@@ -143,7 +176,9 @@ void drawText(ImDrawList* dl, ImFont* font, float px, ImVec2 at, ImU32 col, cons
 }
 float textWidth(ImFont* font, float px, const char* text, float tracking = 0.f) {
     if (!font) font = ImGui::GetFont();
-    const size_t n = strlen(text);
+    text = loc(text);
+    size_t n = 0;
+    for (const char* s = text; *s; s += utf8Len(s)) n++;
     return font->CalcTextSizeA(px, FLT_MAX, 0.f, text).x + tracking * float(n > 0 ? n - 1 : 0);
 }
 
@@ -213,8 +248,9 @@ bool padTest() {
     return on;
 }
 
-enum Section { Display, Gameplay, Audio, Controls, Cheats, Achievements, Mods, SectionCount };
-const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "ACHIEVEMENTS", "MODS"};
+// (no achievements page in this build: RetroAchievements is off unless set in settings.ini)
+enum Section { Display, Gameplay, Audio, Controls, Cheats, Mods, Vr, SectionCount };
+const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "MODS", "VR"};
 int s_section = 0;
 int s_rowSel[SectionCount] = {};    // each page's selected row
 int s_rowCount[SectionCount] = {};  // the rows each page had when it was last drawn
@@ -579,7 +615,7 @@ bool rowBegin(const char* text, const char* help) {
         dl->AddRectFilled(a, ImVec2(a.x + 4.f * s_ui, b.y), kAmber);
         // (copied: some pages build their descriptions on the fly)
         static std::string helpText;
-        helpText = help ? help : "";
+        helpText = help ? loc(help) : "";
         s_help = help ? helpText.c_str() : nullptr;
         if (s_scrollToSel) {
             s_scrollToSel = false;
@@ -590,7 +626,7 @@ bool rowBegin(const char* text, const char* help) {
     ImGui::SetCursorScreenPos(ImVec2(p.x + 20.f * s_ui, p.y));
     ImGui::AlignTextToFramePadding();
     ImGui::PushStyleColor(ImGuiCol_Text, sel ? vec(kGold) : vec(kText));
-    ImGui::TextUnformatted(text);
+    ImGui::TextUnformatted(loc(text));
     ImGui::PopStyleColor();
     ImGui::SameLine(s_valueX);
     return sel;
@@ -618,7 +654,7 @@ bool onOff(const char* id, bool& v, bool sel) {
     } else {
         valueFrame(dl, p, b, sel, hot);
     }
-    const char* text = v ? "ON" : "OFF";
+    const char* text = loc(v ? "ON" : "OFF");
     const ImVec2 ts = ImGui::CalcTextSize(text);
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f),
                 v ? IM_COL32(255, 245, 220, 255) : kDim, text);
@@ -639,6 +675,7 @@ bool toggleRow(const char* text, bool& v, const char* help = nullptr) {
 // a value with arrows either side: the mouse clicks one half, the controller presses left/right.
 // Returns the step clicked (-1 / +1, 0 none).
 int selector(const char* id, const char* text, bool canPrev, bool canNext, bool sel) {
+    text = loc(text);
     const float w = 380.f * s_ui, h = ImGui::GetFrameHeight();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::PushID(id);
@@ -908,6 +945,7 @@ bool buttonRow(const char* text, const char* caption, const char* help, ImU32 ca
     ImGui::PopID();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, hot);
+    caption = loc(caption);
     const ImVec2 ts = ImGui::CalcTextSize(caption);
     dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(p.x + (w - ts.x) * 0.5f, p.y + (h - ts.y) * 0.5f),
                 sel ? kGold : captionCol, caption);
@@ -916,6 +954,7 @@ bool buttonRow(const char* text, const char* caption, const char* help, ImU32 ca
 
 // a gold heading with a rule after it
 void heading(const char* text) {
+    text = loc(text);
     ImGui::Dummy(ImVec2(0, 4.f * s_ui));
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -1105,34 +1144,35 @@ void pageDisplay(settings::Settings& s) {
                              : "Your Rogue Leader disc image: where it is, or choose another (from the next start).",
                   discReady() ? kText : kAmber))
         discPageOpen();
+    {
+        const bool sel = rowBegin("Language", "The language of this menu (the launcher and the in-game menu). The game's "
+                                              "own language: Game language.");
+        static const char* const names[] = {"English", "Español"};
+        const int cur = std::clamp(s.language, 0, 1);
+        const int next = choiceStep(cur, 2, selector("Language", names[cur], cur > 0, cur < 1, sel), sel);
+        if (next != cur) {
+            s.language = next;
+            s_changed = true;
+        }
+    }
+    {
+        const bool sel = rowBegin("Game language", "The game's texts, menus and radio voices. Spanish needs, in the same "
+                                                   "folder as the USA disc, your disc of the Spanish release (GSWS64) or the "
+                                                   "folder red_two_es made from it (red_two --extract-spanish <disc>). "
+                                                   "From the next start.");
+        static const char* const names[] = {"English", "Español"};
+        const int cur = std::clamp(s.gameLanguage, 0, 1);
+        const int next = choiceStep(cur, 2, selector("Game language", names[cur], cur > 0, cur < 1, sel), sel);
+        if (next != cur) {
+            s.gameLanguage = next;
+            s_changed = true;
+        }
+    }
     if (toggleRow("Show launcher at start", s.launcher,
                   s_launcher ? "Off: from the next start Red Two goes straight into the game. The launcher comes back "
                                "with this switch in the in-game menu (F1 or the controller's Back)."
                              : "On: Red Two opens the launcher before the game starts. Off: straight into the game."))
         s_changed = true;
-    {
-        std::string help = std::string("At start, Red Two asks GitHub whether a newer version is out, and offers it at the top "
-                                       "of this page. Off: it never asks. This is Red Two ") +
-                           update::version() + ".";
-        if (toggleRow("Check for updates", s.checkUpdates, help.c_str())) {
-            s_changed = true;
-            if (s.checkUpdates) update::check();
-        }
-    }
-#ifndef __ANDROID__
-    {
-        // Discord Rich Presence (discord.cpp): on and off at once
-        const std::string help = "Your Discord profile shows that you're playing Red Two, the mission you're in and for how "
-                                 "long. It needs the Discord app open on this PC; nothing else is sent anywhere. " +
-                                 discord::statusText();
-        if (toggleRow("Discord Rich Presence", s.discordPresence, help.c_str())) s_changed = true;
-    }
-#endif
-    if (*discord::invite() &&
-        buttonRow("Red Two's Discord", "JOIN",
-                  "Chat and news on Red Two's Discord server: opens the invite in your browser. Bug reports go on "
-                  "GitHub Issues (see the README's \"Reporting a problem\")."))
-        openUrl(discord::invite());
     if (confirmRow("Quit to desktop", "QUIT", "PRESS AGAIN: QUIT", s_confirmQuit,
                    "Close Red Two. What the game saved to its memory card and your save states are kept; a mission in "
                    "progress is not.")) {
@@ -2247,6 +2287,10 @@ void pageControls() {
                     "up evenly to full speed. Linear: in proportion to the stick. GameCube: the game's own curve, "
                     "half speed up to 80% of the stick, then a jump to full."))
             s_changed = true;
+        if (toggleRow("Invert Y axis", st.stickInvertY,
+                      "Off: pushing the control stick forward dives, as on the GameCube. On: forward climbs and "
+                      "back dives, like a plane's control column. Flight only: the menus keep the stick as it is."))
+            s_changed = true;
         if (percentRow("Deadzone", st.stickDeadzone,
                        "How far the control stick moves before anything happens (round, and the output grows from "
                        "zero at its edge). Raise it if the craft drifts with the stick let go.",
@@ -2467,6 +2511,87 @@ void keyCap(ImDrawList* dl, ImVec2 c, const char* text, bool lit) {
 }
 
 // the tabs: across the top, LB / RB (Q / E) caps at the ends
+// one of `n` labelled values: the index of the one nearest `v` is shown; true when another was
+// chosen (v takes its value)
+template <typename T>
+bool valueRow(const char* text, T& v, const T* values, const char* const* labels, int n, const char* help) {
+    const bool sel = rowBegin(text, help);
+    int cur = 0;
+    for (int i = 1; i < n; i++)
+        if (std::abs(double(values[i]) - double(v)) < std::abs(double(values[cur]) - double(v))) cur = i;
+    const int next = choiceStep(cur, n, selector(text, labels[cur], cur > 0, cur < n - 1, sel), sel);
+    if (next == cur) return false;
+    v = values[next];
+    return true;
+}
+
+// VR (--xr; gfx/xr.cpp): the headset's refresh rate, stereo 3D, the HUD, the view and the screen
+void pageVr(settings::Settings& s) {
+    bool vr = false;  // (applied to the running session: xr::applySettings)
+    heading("HEADSET");
+    if (toggleRow("Play in VR", s.vr,
+                  "On: Red Two starts in your VR headset (OpenXR: Virtual Desktop, Quest Link, SteamVR), as with --xr. "
+                  "Off: on the monitor (--xr still starts in VR). From the next start."))
+        s_changed = true;
+    {
+        static const int rates[] = {0, 72, 80, 90, 120};
+        static const char* const labels[] = {"HEADSET'S OWN", "72 HZ", "80 HZ", "90 HZ", "120 HZ"};
+        if (valueRow("Refresh rate", s.xrRefreshRate, rates, labels, 5,
+                     "The headset's refresh rate, asked of the OpenXR runtime (Virtual Desktop, Quest Link, SteamVR). "
+                     "The game itself keeps its own frame rate (Display: 60 FPS); the headset fills the frames in "
+                     "between, turned with your head. Applies at once in the headset."))
+            s_changed = vr = true;
+    }
+    if (toggleRow("Stereo 3D in flight", s.xrStereo,
+                  "On: in flight the world is around you in 3D, seen through your own eyes. Off: the game on a flat "
+                  "virtual screen all the time. From the next start."))
+        s_changed = true;
+    heading("FLIGHT");
+    {
+        static const float dist[] = {5.f, 10.f, 20.f, 40.f};
+        static const char* const labels[] = {"NEAR", "MEDIUM", "FAR", "VERY FAR"};
+        if (valueRow("HUD distance", s.xrHudDistance, dist, labels, 4,
+                     "How far ahead the HUD (reticle, radar, counters) floats, fixed to the game's view. Nearer: "
+                     "bigger and easier to read; farther: easier to focus with the world behind it."))
+            s_changed = vr = true;
+    }
+    {
+        static const int ranges[] = {3, 4, 5, 6, 8};
+        static const char* const labels[] = {"3X", "4X", "5X", "6X", "8X"};
+        if (valueRow("View range", s.xrViewRange, ranges, labels, 5,
+                     "How far round the game's own view the world is drawn: the headset shows far more than the "
+                     "game's camera. More: no ground missing under you or to the sides; less: fewer distant "
+                     "buildings appearing late."))
+            s_changed = true;
+    }
+    if (buttonRow("Reset camera zoom", "RESET",
+                  "Puts the camera back where the game has it: undoes the zoom set with the right grip and the "
+                  "right thumbstick up / down in flight."))
+        xr::resetCameraZoom(), s_changed = true;
+    if (toggleRow("Targeting computer toggles", s.targetingToggle,
+                  "On: Y turns the targeting computer on, the next Y off. Off: it shows while Y is held, as on the "
+                  "GameCube."))
+        s_changed = true;
+    heading("VIRTUAL SCREEN");
+    {
+        static const float widths[] = {2.4f, 3.2f, 4.2f, 5.4f};
+        static const char* const labels[] = {"SMALL", "MEDIUM", "LARGE", "HUGE"};
+        if (valueRow("Screen size", s.xrScreenWidth, widths, labels, 4,
+                     "The flat screen the menus, the hangar and the cinematics show on, 2.5 m away: Medium is about "
+                     "65 degrees across."))
+            s_changed = vr = true;
+    }
+    {
+        static const float depths[] = {0.f, 1.f, 2.f, 3.f, 4.f};
+        static const char* const labels[] = {"OFF", "LOW", "MEDIUM", "HIGH", "VERY HIGH"};
+        if (valueRow("Screen depth", s.xrScreenDepth, depths, labels, 5,
+                     "The 3D depth of the screen in the hangar and cinematics (also: hold the right grip and move "
+                     "the right thumbstick left / right there)."))
+            s_changed = vr = true;
+    }
+    if (vr) xr::applySettings();
+}
+
 void tabBar() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float avail = ImGui::GetContentRegionAvail().x;
@@ -2488,11 +2613,12 @@ void tabBar() {
         if (on) dl->AddRectFilled(ImVec2(a.x + 14.f * s_ui, b.y - 4.f * s_ui), ImVec2(b.x - 14.f * s_ui, b.y), kAmber);
         // (smaller where a name does not fit: seven tabs on a narrow screen)
         float px = 22.f * s_ui, tr = 4.f * s_ui;
-        const float fit = tw - 16.f * s_ui, full = textWidth(s_font, px, kSectionNames[i], tr);
+        const char* name = loc(kSectionNames[i]);
+        const float fit = tw - 16.f * s_ui, full = textWidth(s_font, px, name, tr);
         if (full > fit) px *= fit / full, tr *= fit / full;
-        const float w = textWidth(s_font, px, kSectionNames[i], tr);
+        const float w = textWidth(s_font, px, name, tr);
         drawText(dl, s_font, px, ImVec2(a.x + (tw - w) * 0.5f, a.y + h * 0.5f - px * 0.55f),
-                 on ? kGold : (hot ? kText : kDim), kSectionNames[i], tr, on ? alpha(kAmber, 40) : 0);
+                 on ? kGold : (hot ? kText : kDim), name, tr, on ? alpha(kAmber, 40) : 0);
     }
     const float cy = p.y + h * 0.5f;
     keyCap(dl, ImVec2(p.x + capW * 0.5f, cy), s_usingPad ? padName("LB", "L1") : "Q",
@@ -2561,20 +2687,20 @@ bool drawMenu(settings::Settings& s, float t) {
     const float titleY = a.y + pad * 0.55f;
     drawText(bg, s_fontBig, titlePx, ImVec2(a.x + pad, titleY), kGold, "RED TWO", 10.f * s_ui, alpha(kAmber, 50));
     drawText(bg, s_font, 18.f * s_ui, ImVec2(a.x + pad + 2.f, titleY + titlePx * 1.02f), kHolo,
-             s_launcher ? "ROGUE SQUADRON II  //  PRE-FLIGHT CHECK" : "ROGUE SQUADRON II  //  FLIGHT SYSTEMS CONFIGURATION",
+             loc(s_launcher ? "ROGUE SQUADRON II  //  PRE-FLIGHT CHECK" : "ROGUE SQUADRON II  //  FLIGHT SYSTEMS CONFIGURATION"),
              3.f * s_ui);
     const float blink = 0.5f + 0.5f * std::sin(t * 3.f);
     const ImVec2 lamp(b.x - pad - 8.f * s_ui, titleY + titlePx * 0.45f);
     bg->AddCircleFilled(lamp, 6.f * s_ui, alpha(kAmber, int(120 + 135 * blink)));
     bg->AddCircle(lamp, 11.f * s_ui, alpha(kAmber, 90), 24, 1.f);
-    const char* status = s_launcher ? "AWAITING LAUNCH" : "SYSTEMS ONLINE";
+    const char* status = loc(s_launcher ? "AWAITING LAUNCH" : "SYSTEMS ONLINE");
     const float statusPx = 17.f * s_ui;
     drawText(bg, s_font, statusPx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, statusPx, status, 2.f * s_ui), lamp.y - 9.f * s_ui),
              kDim, status, 2.f * s_ui);
     {
         const update::Status us = update::status();
         const bool news = us.phase == update::Phase::Available || us.phase == update::Phase::Ready;
-        const std::string ver = news ? "UPDATE " + us.latest + " AVAILABLE" : std::string("VERSION ") + update::version();
+        const std::string ver = news ? loc("UPDATE ") + us.latest + loc(" AVAILABLE") : std::string(loc("VERSION ")) + update::version();
         const float vpx = 14.f * s_ui;
         drawText(bg, s_font, vpx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, vpx, ver.c_str(), 2.f * s_ui), lamp.y + 12.f * s_ui),
                  news ? kAmber : alpha(kDim, 150), ver.c_str(), 2.f * s_ui);
@@ -2587,14 +2713,14 @@ bool drawMenu(settings::Settings& s, float t) {
     bg->AddLine(ImVec2(a.x + pad, helpY - 12.f * s_ui), ImVec2(b.x - pad, helpY - 12.f * s_ui), alpha(kGold, 50), 1.f);
     // (a PlayStation controller's buttons by their names: cross, circle, square, L1 / R1, ...)
     const std::string accept = padName("A", "CROSS"), back = padName("B", "CIRCLE"), clear = padName("X", "SQUARE");
-    std::string hint = s_usingPad ? std::string(padName("LB / RB", "L1 / R1")) + "  TABS      D-PAD / STICK  MOVE, CHANGE      " + accept + "  SELECT"
-                                  : "Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT";
-    if (s_section == Controls) hint += s_usingPad ? "      " + clear + "  CLEAR" : "      DEL  CLEAR";
-    if (s_launcher) hint += s_usingPad ? std::string("      ") + padStartName() + "  LAUNCH" : "";
-    else hint += s_usingPad ? "      " + back + " / " + padBackName() + "  CLOSE" : "      ESC / F1  CLOSE";
+    std::string hint = s_usingPad ? std::string(padName("LB / RB", "L1 / R1")) + loc("  TABS      D-PAD / STICK  MOVE, CHANGE      ") + accept + loc("  SELECT")
+                                  : loc("Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT");
+    if (s_section == Controls) hint += s_usingPad ? "      " + clear + loc("  CLEAR") : loc("      DEL  CLEAR");
+    if (s_launcher) hint += s_usingPad ? std::string("      ") + padStartName() + loc("  LAUNCH") : "";
+    else hint += s_usingPad ? "      " + back + " / " + padBackName() + loc("  CLOSE") : loc("      ESC / F1  CLOSE");
     if (s_browsing && s_section == s_browseSection)
-        hint = s_usingPad ? "D-PAD / STICK  MOVE      " + accept + "  OPEN, SELECT      " + clear + "  PARENT FOLDER      " + back + "  BACK"
-                          : "ARROWS  MOVE      ENTER  OPEN, SELECT      BACKSPACE  PARENT FOLDER      ESC  BACK";
+        hint = s_usingPad ? loc("D-PAD / STICK  MOVE      ") + accept + loc("  OPEN, SELECT      ") + clear + loc("  PARENT FOLDER      ") + back + loc("  BACK")
+                          : loc("ARROWS  MOVE      ENTER  OPEN, SELECT      BACKSPACE  PARENT FOLDER      ESC  BACK");
     drawText(bg, s_font, 16.f * s_ui, ImVec2(a.x + pad, footY), kDim, hint.c_str(), 2.f * s_ui);
 
     // the interactive part: an invisible window over the panel body
@@ -2625,8 +2751,8 @@ bool drawMenu(settings::Settings& s, float t) {
         case Audio: pageAudio(s); break;
         case Controls: pageControls(); break;
         case Cheats: pageCheats(s); break;
-        case Achievements: pageAchievements(s); break;
         case Mods: pageMods(s); break;
+        case Vr: pageVr(s); break;
         }
         ImGui::Dummy(ImVec2(0, 8.f * s_ui));
         if (!s_browseLeft) {  // (left the folder browser mid-page: keep the MODS row to return to)
@@ -3056,7 +3182,7 @@ void drawShaderProgress(u32 done, u32 total, u64 texDone, u64 texTotal, u64 texB
     dl->AddRectFilled(ImVec2(0, 0), disp, IM_COL32(0, 0, 0, 255));
     const float cx = disp.x * 0.5f, cy = disp.y * 0.5f;
     const bool textures = texTotal != 0;
-    const char* title = textures ? "PREPARING SHADERS AND TEXTURES" : "PREPARING SHADERS";
+    const char* title = loc(textures ? "PREPARING SHADERS AND TEXTURES" : "PREPARING SHADERS");
     const float tpx = 38.f * ui, track = 5.f * ui;
     const float top = textures ? cy - 120.f * ui : cy - 80.f * ui;
     drawText(dl, s_fontBig, tpx, ImVec2(cx - textWidth(s_fontBig, tpx, title, track) * 0.5f, top), kGold, title, track);
@@ -3089,6 +3215,8 @@ void drawShaderProgress(u32 done, u32 total, u64 texDone, u64 texTotal, u64 texB
 }
 
 void menuDraw() {
+    // VR: the headset shows the window's picture, which has no system cursor: ImGui draws one
+    if (ImGui::GetCurrentContext()) ImGui::GetIO().MouseDrawCursor = xr::active();
     // widescreen: the game's cameras take the aspect the frame is rendered at (so they also cull
     // for it); 4:3 restores the original
     applyDisplayAspect();  // match window: a resize may cross the 21:9 limit
@@ -3227,7 +3355,7 @@ void menuDraw() {
         }
     }
     if (cinematicSkip()) {
-        const char* text = "SKIPPING";
+        const char* text = loc("SKIPPING");
         const float px = 34.f * ui;
         const float tw = textWidth(s_font, px, text, 8.f * ui);
         const ImVec2 c(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);

@@ -487,6 +487,7 @@ void init() {
 }
 
 void setFlight(bool flying) { s_flight = flying; }
+bool flying() { return s_flight; }
 std::string controllerName() {
     // (the menu: also before the game runs and while gyro aiming is off, when apply looks for none)
     if (input::JoystickAccess joy; joy) {
