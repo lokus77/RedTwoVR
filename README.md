@@ -1,25 +1,56 @@
-# Red Two
+**English** | [Español](README_ES.md)
 
-Version PCVR del recomp **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube).
+# Red Two VR
 
-Basado en la versión 1.3 de Rengar https://github.com/gminustwo/red_two/releases/tag/v1.3
+PC VR version of the **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) recompilation.
 
+Based on version 1.4 of Red Two: https://github.com/gminustwo/red_two/releases/tag/v1.4
 
-**No se incluyen datos de juego**: necesitas tu propia imagen de disco de la versión estadounidense (`GSWE64`, revisión 0), tanto para las descargas como para tu propia compilación.
+**No game data is included**: you need your own disc image of the USA release (`GSWE64`,
+revision 0), both for the downloads and for your own build.
 
-Esta versión admite jugar en Castellano, si utilizamos en una carpeta \red_two_es\ los ficheros extraídos de la rom spain de gamecube del juego.
-Se requieren: 
-frontendSP.bin
-resDir_rows.bin
-staticGame_sp.bin
-text_Spanish.bin
-voiceDir.bin
-r2voice.vdy
+**Download**: the Windows zip is on the [Releases](../../releases) page. Unzip it anywhere and run
+`red_two.exe`; if it can't find the disc, the launcher asks for it (a `GSWE64.rvz` next to
+`red_two.exe` is found by itself). The zip is portable (everything of yours stays in its `user`
+folder) and brings the Visual C++ runtime with it.
 
-Ocupan 132Mb.
+## Virtual reality
 
--Añadida opción de control eje Y invertido
+- A headset with OpenXR running before you start: Virtual Desktop, Quest Link or SteamVR.
+- The launcher's **VR** tab > **Play in VR** starts in the headset; `red_two.exe --no-xr` starts
+  on the monitor.
+- Flight in stereo 3D with head tracking and the HUD at a fixed distance; menus, the hangar and
+  cutscenes on a virtual screen.
+- **Resolution** (VR tab): what is rendered per eye, from Low (1728) to Godlike (3200), or the
+  headset's own; the eyes reach the headset at full resolution.
+- **Refresh rate** of the headset: 72, 80, 90 or 120 Hz, with the game at its own frame rate.
+- **Haptics** on both Touch controllers: lasers faint, torpedoes hard, damage by the size of the
+  hit, and a long rumble when your craft blows up.
 
+### Touch controls
+
+| Control | In flight |
+|---|---|
+| A | fire lasers |
+| B | fire torpedoes (hold 2 s: skip a cutscene) |
+| X | cockpit view |
+| Y | cockpit view with the targeting computer (press to turn it on and off); in menus, audio description |
+| Right grip + right stick up / down | move the camera closer |
+| Left grip + left stick | give orders to your squadron (the d-pad) |
+| Triggers | throttle and brake |
+
+## Spanish
+
+Red Two VR can be played in Spanish (texts, menus and radio voices) with the pieces extracted from
+your own disc of the Spanish release (`GSWS64`), in a `red_two_es` folder next to the USA disc:
+
+```
+red_two.exe --extract-spanish <your GSWS64 disc image> red_two_es
+```
+
+It writes `frontendSP.bin`, `resDir_rows.bin`, `staticGame_sp.bin`, `text_Spanish.bin`,
+`voiceDir.bin` and `r2voice.vdy` (about 132 MB). Then, in the launcher: GAME > Game language >
+Español. GAME > Language puts Red Two's own menus in Spanish.
 
 ## Building (Windows)
 
@@ -42,20 +73,6 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
 
 `tools\make_release_win.ps1` packs a build into `build\RedTwo-windows-x64.zip` (the program, its
 symbols, DLLs, a readme) for your own use on another PC.
-
-
-
-### Android (experimental)
-
-The APK (`RedTwo-v<version>-android-arm64.apk`) is for 64-bit ARM phones and handhelds with
-Vulkan 1.1 (Android 10 or newer). It is new and has had little testing on real devices: reports
-are welcome. Install it (your phone asks to allow installs from that app), start Red Two and
-choose your disc image in the system's file picker, or copy it into
-`Android/data/io.github.gminustwo.redtwo/files` over USB first. A controller works, and touch
-controls are on screen; the back button or gesture opens the menu. Settings, the memory card,
-save states and logs are in that same folder. A save state loads only in the session that made
-it (the game's own saves on the memory card are not affected). Updates: the menu says when a new
-version is out and opens its page; install the new APK over the old one.
 
 ### Playing
 
@@ -117,8 +134,7 @@ version is out and opens its page; install the new APK over the old one.
   holds settings, the memory card, save states, logs, texture packs, codes and the shader cache,
   so the folder can live anywhere (another drive, a NAS). An install that has no `user` folder
   but an older `%APPDATA%\Red Two` keeps using that one; create `user` to make it portable (its
-  first start copies the settings, controls and memory card over). Linux: `~/.local/share/Red Two/`;
-  macOS: `~/Library/Application Support/Red Two/`; Android: `Android/data/io.github.gminustwo.redtwo/files`.
+  first start copies the settings, controls and memory card over).
 - **Cheats** (F1 > Cheats): invincibility, infinite lives, infinite bombs, perfect mission
   stats (the results screen says 0:01, every enemy destroyed, 100% accuracy, no friendlies or
   lives lost and 100% targeting computer efficiency, and the medal is awarded for those), and
@@ -159,23 +175,21 @@ version is out and opens its page; install the new APK over the old one.
   its codes (with their on/off states). `R2_DOLPHIN_DIR=<User folder>` points it elsewhere.
 - **Shaders** (F1, DISPLAY -> PERFORMANCE): "Prepare shaders at start" (on) compiles every shader
   the game has used on this device before it starts; off, the game starts at once and objects may
-  pop in while their shaders compile. The downloads bring a starter list of the game's shaders, so
-  a new install's first start compiles them before the game begins (about 20 seconds on a desktop,
-  once; later starts take about a second). "Ubershaders" (on; off on a Steam Deck's first start)
-  draws not-yet-compiled objects with a generic shader instead of skipping them.
+  pop in while their shaders compile. "Ubershaders" (on) draws not-yet-compiled objects with a
+  generic shader instead of skipping them.
 - **Sound** (F1, AUDIO): the game mixes for Dolby Pro Logic II. **Speakers**: Automatic follows
   the system's speaker setup; Stereo sends the encoded mix for a receiver's Pro Logic II decoder;
   5.1 and 7.1 give the rear its own speakers (7.1 splits it into side and back pairs). Keep the
-  game's own sound setting (Options > Sound Settings) on STEREO. `R2_NO_AUDIO=1` runs without
-  sound.
-- Every session writes a log to the user folder's `logs` 
+  game's own sound setting (Options > Sound Settings) on STEREO. **Audio buffer** (normal, large,
+  huge): a larger one if the sound is choppy. `R2_NO_AUDIO=1` runs without sound.
+- Every session writes a log to the user folder's `logs`,
   also when another program starts Red Two (RecompLauncher, a terminal): that program gets a copy
   of it as well. `--console` shows it in a console window on Windows.
 
-
 ## Credits
 
-Some features come from ZeDctr's [Red Two Plus](https://github.com/ZeDctr/red_two_plus) fork:
+Red Two is gminustwo's [recompilation](https://github.com/gminustwo/red_two). Some features come
+from ZeDctr's [Red Two Plus](https://github.com/ZeDctr/red_two_plus) fork:
 hold-to-skip cutscenes, the documentary's speed fix, seeking and pause menu, Switch button
 prompts, the memory card's first save, pausing the audio commentary, the mouse in the game's menus,
 cinematic bars and faster audio catch-up. Rendering is [Aurora](https://github.com/encounter/aurora)'s.
