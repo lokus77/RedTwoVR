@@ -1053,9 +1053,10 @@ static bool isSpanishImage(const std::string& path) {
     return img && img->read(0, id, sizeof id) && !memcmp(id, "GSWS64", 6);
 }
 
-// The game in Spanish (setting game_language es): its pieces from R2_SPANISH_DISC, or the place found
-// before (spanish_disc_path), or beside the USA disc: the folder red_two_es (--extract-spanish), else
-// a GSWS64 disc image (then remembered). "": English.
+// The game in Spanish (setting game_language es): its pieces from R2_SPANISH_DISC, or spanish_disc_path
+// (relative: to the user folder, where settings.ini is), or beside the USA disc: the folder red_two_es
+// (--extract-spanish), else a GSWS64 disc image - then remembered, relative to the user folder when
+// it can be (a portable folder moved elsewhere still finds it). "": English.
 namespace rt {
 std::string spanishProblem(const std::string& path);  // disc_language.cpp
 bool extractSpanish(const std::string& discPath, const std::string& dir, std::string& why);
@@ -1066,14 +1067,26 @@ static std::string spanishDisc(const std::string& usa) {
     if (const char* v = getenv("R2_SPANISH_DISC"); v && *v) return v;
     rt::settings::Settings& s = rt::settings::get();
     if (s.gameLanguage != 1) return "";
-    if (!s.spanishDiscPath.empty() && rt::spanishProblem(s.spanishDiscPath).empty()) return s.spanishDiscPath;
     std::error_code ec;
+    const std::string userDir = rt::mods::userDir();
+    const fs::path user = fs::absolute(fs::path(std::u8string(userDir.begin(), userDir.end())), ec);
+    auto str = [](const fs::path& p) {
+        const std::u8string u8 = p.u8string();
+        return std::string(u8.begin(), u8.end());
+    };
+    if (!s.spanishDiscPath.empty()) {
+        fs::path p(std::u8string(s.spanishDiscPath.begin(), s.spanishDiscPath.end()));
+        if (p.is_relative() && !userDir.empty()) p = (user / p).lexically_normal();
+        if (rt::spanishProblem(str(p)).empty()) return str(p);
+        rt::logf("disc", "spanish_disc_path %s (%s): %s", s.spanishDiscPath.c_str(), str(p).c_str(), rt::spanishProblem(str(p)).c_str());
+    }
     const fs::path dir = fs::absolute(fs::path(std::u8string(usa.begin(), usa.end())), ec).parent_path();
     auto found = [&](const fs::path& p) {
-        const std::u8string u8 = p.u8string();
-        s.spanishDiscPath.assign(u8.begin(), u8.end());
+        std::error_code rec;
+        const fs::path rel = userDir.empty() ? fs::path() : fs::relative(p, user, rec);
+        s.spanishDiscPath = rec || rel.empty() ? str(p) : str(rel);
         rt::settings::save();
-        return s.spanishDiscPath;
+        return str(p);
     };
     if (const std::u8string folder = (dir / "red_two_es").u8string(); rt::spanishProblem(std::string(folder.begin(), folder.end())).empty())
         return found(dir / "red_two_es");
