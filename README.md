@@ -43,45 +43,7 @@ The code generated from your disc ends up in `build/` and is yours alone: never 
 `tools\make_release_win.ps1` packs a build into `build\RedTwo-windows-x64.zip` (the program, its
 symbols, DLLs, a readme) for your own use on another PC.
 
-## Building (Linux) and the Steam Deck AppImage
 
-Requirements: clang, lld, CMake 3.25+, Ninja, git, and SDL3's build dependencies (X11, Wayland,
-xkbcommon, ALSA / PulseAudio / PipeWire, udev and D-Bus development packages). Ubuntu 24.04 (also
-under WSL2) works; the result needs glibc 2.38 or later (SteamOS 3.6+).
-
-```bash
-tools/build_linux.sh --disc "<your Rogue Leader.rvz>"     # -> build/linux/red_two
-# an AppImage: the AppImage type 2 runtime (github.com/AppImage/type2-runtime, runtime-x86_64),
-# mksquashfs and patchelf
-tools/make_appimage.sh --runtime runtime-x86_64 --icon <256x256 png>   # -> build/linux/RedTwo-x86_64.AppImage
-```
-
-On the Steam Deck: copy the AppImage and your disc image (`.rvz` / `.iso`, any name) into the
-same folder (or the disc into `~/Emulation/roms/gc`), make the AppImage executable, and add it
-to Steam as a non-Steam game. The first start on a Deck is fullscreen with the picture as wide
-as the screen. Settings, saves, states and logs live in `~/.local/share/Red Two/`.
-
-## Building (macOS, Apple Silicon)
-
-Requirements: the Xcode command line tools (`xcode-select --install`), CMake 3.25+ and Ninja
-(`brew install cmake ninja`). Dawn (Metal), SDL3 and the other libraries are fetched and linked
-in statically: the app needs nothing installed to run.
-
-```bash
-tools/build_macos.sh --disc "<your Rogue Leader.rvz>"     # -> build/macos/Red Two.app
-```
-
-Copy `Red Two.app` anywhere; a disc image in the same folder as the app is found by itself.
-Settings, saves, states and logs live in `~/Library/Application Support/Red Two/`. The arm64
-loader allows only position-independent programs, so (as on Android) a save state loads only
-into the session that made it; the game's own saves on the memory card are not affected.
-
-If the app or the disc is in Downloads, Desktop or Documents, macOS asks once whether Red Two
-may use that folder, before the window opens: allow it (System Settings > Privacy & Security >
-Files and Folders changes it later). The app is signed ad hoc, which is enough on the Mac that
-built it. A copy downloaded or AirDropped to another Mac is quarantined: open it once, then
-choose Open Anyway in System Settings > Privacy & Security (or run
-`xattr -dr com.apple.quarantine "Red Two.app"`).
 
 ### Playing
 
