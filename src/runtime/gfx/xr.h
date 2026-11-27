@@ -9,6 +9,10 @@ namespace rt::xr {
 bool preinit(int argc, char** argv);
 // After aurora_initialize: the session on Aurora's D3D12 device, and the per-frame hook.
 void start();
+// VR this run (a headset session, or R2_XR_FAKE): the VR page's resolution applies
+bool enabled();
+// The eyes' height the OpenXR runtime recommends (pixels; 0: no headset)
+int recommendedEyeHeight();
 // The session is running (the headset shows the screen).
 bool active();
 // Stereo 3D is on (--xr, unless R2_XR_MODE=screen): Aurora renders both eyes.
@@ -34,5 +38,8 @@ void setGameView(float fovY, float aspect);
 void applySettings();
 // The VR page's "Reset camera zoom": the eyes back at the game's camera (xr_camera_forward 0)
 void resetCameraZoom();
+// A vibration of both Touch controllers (amplitude 0..1, seconds), e.g. as the player fires;
+// any thread (the next presented frame starts it). A stronger one replaces a weaker one pending.
+void haptic(float amplitude, float seconds);
 
 }  // namespace rt::xr

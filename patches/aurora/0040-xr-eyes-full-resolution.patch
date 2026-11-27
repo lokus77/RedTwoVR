@@ -1,0 +1,41 @@
+diff --git a/lib/gfx/present_target.cpp b/lib/gfx/present_target.cpp
+index 03113c6..28ec9e8 100644
+--- a/lib/gfx/present_target.cpp
++++ b/lib/gfx/present_target.cpp
+@@ -475,7 +475,9 @@ void submit(const Request& request) {
+     if (const auto hook = g_presentHook.load(std::memory_order_acquire)) {
+       ZoneScopedN("Present hook");
+       const bool sampled = (snapshot.usage & wgpu::TextureUsage::TextureBinding) != wgpu::TextureUsage::None;
+-      hook(webgpu::g_device, webgpu::g_queue, request.source.texture, request.stereoRight,
++      // (stereo: the eyes at the size they were drawn at, not the window's)
++      hook(webgpu::g_device, webgpu::g_queue, request.stereoLeft ? request.stereoLeft : request.source.texture,
++           request.stereoRight,
+            sampled ? surfaceTexture.texture : wgpu::Texture{}, request.frame,
+            g_presentHookData.load(std::memory_order_relaxed));
+     }
+diff --git a/lib/gfx/present_target.hpp b/lib/gfx/present_target.hpp
+index dd0a182..6357c3e 100644
+--- a/lib/gfx/present_target.hpp
++++ b/lib/gfx/present_target.hpp
+@@ -28,6 +28,7 @@ struct Request {
+   TargetSnapshot target;
+   webgpu::TextureWithSampler source;
+   wgpu::Texture stereoRight; // VR stereo: the right eye's XFB (primary present only)
++  wgpu::Texture stereoLeft;  // VR stereo: the left eye's XFB as drawn (source: resampled to the window)
+   uint32_t frame = 0;        // current_frame() while it was recorded (primary present only)
+   webgpu::Viewport viewport{};
+   wgpu::BindGroup rmlBindGroup;
+diff --git a/lib/gfx/recording.cpp b/lib/gfx/recording.cpp
+index ea8449b..723795e 100644
+--- a/lib/gfx/recording.cpp
++++ b/lib/gfx/recording.cpp
+@@ -741,6 +741,9 @@ void record_xfb_present(imgui::DrawData drawData, wgpu::BindGroup rmlBindGroup,
+   request.frame = current_frame();
+   if (webgpu::g_stereo) {
+     request.stereoRight = g_xfbRight.texture;
++    if (g_xfb.view && g_xfbRight.texture) {
++      request.stereoLeft = g_xfb.texture;
++    }
+   }
+   request.imguiDrawData = std::move(drawData);
+   request.rmlBindGroup = std::move(rmlBindGroup);

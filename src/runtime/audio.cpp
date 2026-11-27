@@ -52,7 +52,7 @@ u32 s_dumpBytes = 0, s_dumpRate = 0;
 int s_dumpChannels = 0;
 
 double s_targetMs = 50.0;     // the cushion playback keeps
-constexpr double kMaxMs = 150.0;  // past this blocks are dropped (only after a burst)
+double kMaxMs = 150.0;  // past this blocks are dropped (only after a burst): the cushion + 100 ms
 constexpr double kMaxRatioOff = 0.005;
 bool s_playing = false;
 double s_avgMs = 0.0;  // queue depth, smoothed: the device takes it in chunks of its period
@@ -183,7 +183,11 @@ void init() {
             fwrite(room, 1, sizeof room, s_dump);
         }
     }
-    if (const char* ms = getenv("R2_AUDIO_MS")) s_targetMs = std::clamp(atof(ms), 10.0, 120.0);
+    setBuffer(settings::get().audioBuffer);
+    if (const char* ms = getenv("R2_AUDIO_MS")) {
+        s_targetMs = std::clamp(atof(ms), 10.0, 250.0);
+        kMaxMs = s_targetMs + 100.0;
+    }
     s_speakers = int(settings::get().speakers);
     if (envFlag("R2_NO_AUDIO")) return;
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
@@ -193,6 +197,15 @@ void init() {
     s_sdlAudio = true;
     s_rate = 32000;
     openStream();
+}
+
+void setBuffer(int level) {
+    static constexpr double kMs[] = {50.0, 100.0, 160.0};
+    const double ms = kMs[std::clamp(level, 0, 2)];
+    if (ms == s_targetMs && kMaxMs == ms + 100.0) return;
+    s_targetMs = ms;
+    kMaxMs = ms + 100.0;
+    if (s_stream) logf("audio", "buffer %.0f ms", ms);  // (taken up as the queue drifts to it)
 }
 
 void setSpeakers(int speakers) {

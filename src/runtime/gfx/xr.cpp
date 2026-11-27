@@ -27,7 +27,8 @@
 //
 // The Touch controllers (OpenXR actions) drive a virtual SDL gamepad laid out like an Xbox
 // controller, so the game, the menus and the hotkeys take them as any other controller (port 1
-// follows the one in use): thumbsticks = control stick / C-stick, triggers = L / R (analog),
+// follows the one in use; the left grip held + the left thumbstick = the d-pad): thumbsticks =
+// control stick / C-stick, triggers = L / R (analog),
 // grips = LB / RB (RB = Z), A B X Y = A B X Y, the left menu button = Start, the left
 // thumbstick's click = Back (the F1 menu, the hotkeys), the right one's = the right stick click.
 //
@@ -41,6 +42,8 @@ namespace rt::xr {
 bool preinit(int, char**) { return false; }
 void start() {}
 bool active() { return false; }
+bool enabled() { return false; }
+int recommendedEyeHeight() { return 0; }
 bool stereo() { return false; }
 bool frameViews(float (*)[16]) { return false; }
 void setFlight(bool) {}
@@ -48,6 +51,7 @@ bool cameraRotation(float*) { return false; }
 void setGameView(float, float) {}
 void applySettings() {}
 void resetCameraZoom() {}
+void haptic(float, float) {}
 }  // namespace rt::xr
 
 #else
@@ -82,6 +86,7 @@ void resetCameraZoom() {}
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
 #include <mutex>
 #include <vector>
 
@@ -177,6 +182,11 @@ std::array<FrameViews, 8> s_frameViews{};  // ring by frame number
 XrActionSet s_actionSet = XR_NULL_HANDLE;
 enum Act { TrigL, TrigR, GripL, GripR, StickL, StickR, BtnA, BtnB, BtnX, BtnY, BtnMenu, ClickL, ClickR, kActs };
 std::array<XrAction, kActs> s_act{};
+XrAction s_haptic = XR_NULL_HANDLE;  // both controllers' vibration (haptic)
+std::mutex s_hapticMutex;
+float s_hapticAmp = 0.f, s_hapticSecs = 0.f;  // the pulse to start at the next updatePad
+float s_hapticPlaying = 0.f;  // the amplitude of the pulse playing, until s_hapticUntil
+std::chrono::steady_clock::time_point s_hapticUntil{};
 SDL_Joystick* s_joy = nullptr;
 bool s_padLive = false;  // the virtual gamepad holds what the controllers gave (not neutral)
 
@@ -619,7 +629,7 @@ bool createActions() {
         {"click_left", "Back (menu)", XR_ACTION_TYPE_BOOLEAN_INPUT, "/user/hand/left/input/thumbstick/click"},
         {"click_right", "Right stick click", XR_ACTION_TYPE_BOOLEAN_INPUT, "/user/hand/right/input/thumbstick/click"},
     };
-    std::array<XrActionSuggestedBinding, kActs> bindings{};
+    std::array<XrActionSuggestedBinding, kActs + 2> bindings{};
     for (int i = 0; i < kActs; i++) {
         XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
         strcpy(ai.actionName, kDefs[i].name);
@@ -628,9 +638,18 @@ bool createActions() {
         if (!ok(xrCreateAction(s_actionSet, &ai, &s_act[i]), "xrCreateAction")) return false;
         bindings[i] = {s_act[i], path(kDefs[i].binding)};
     }
+    {
+        XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+        strcpy(ai.actionName, "haptic");
+        strcpy(ai.localizedActionName, "Vibration (firing)");
+        ai.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+        if (!ok(xrCreateAction(s_actionSet, &ai, &s_haptic), "xrCreateAction (haptic)")) return false;
+        bindings[kActs] = {s_haptic, path("/user/hand/left/output/haptic")};
+        bindings[kActs + 1] = {s_haptic, path("/user/hand/right/output/haptic")};
+    }
     XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
     sb.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
-    sb.countSuggestedBindings = kActs;
+    sb.countSuggestedBindings = u32(bindings.size());
     sb.suggestedBindings = bindings.data();
     if (!ok(xrSuggestInteractionProfileBindings(s_instance, &sb), "xrSuggestInteractionProfileBindings")) return false;
     XrSessionActionSetsAttachInfo at{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
@@ -685,7 +704,23 @@ void updatePad() {
         synced = XR_SUCCEEDED(xrSyncActions(s_session, &si));
     }
     auto axis = [](float v) { return Sint16(std::lround(std::clamp(v, -1.f, 1.f) * 32767.f)); };
-    const XrVector2f l = synced ? actStick(StickL) : XrVector2f{0.f, 0.f};
+    XrVector2f l = synced ? actStick(StickL) : XrVector2f{0.f, 0.f};
+    // The d-pad (the squadron's orders in flight; the Touch controllers have none): the left grip
+    // held and the left thumbstick pushed. As with the right grip, the grip stays LB for the game
+    // until the stick moves; from then until the grip is let go the game sees neither LB nor the
+    // stick, only the d-pad direction (the stronger axis).
+    static bool s_dpadMode = false;
+    const bool gripL = synced && actFloat(GripL) > 0.5f;
+    if (!gripL) s_dpadMode = false;
+    else if (std::max(std::abs(l.x), std::abs(l.y)) > 0.5f) s_dpadMode = true;
+    bool dUp = false, dDown = false, dLeft = false, dRight = false;
+    if (s_dpadMode) {
+        if (std::max(std::abs(l.x), std::abs(l.y)) > 0.5f) {
+            if (std::abs(l.y) >= std::abs(l.x)) (l.y > 0.f ? dUp : dDown) = true;
+            else (l.x > 0.f ? dRight : dLeft) = true;
+        }
+        l = XrVector2f{0.f, 0.f};
+    }
     XrVector2f r = synced ? actStick(StickR) : XrVector2f{0.f, 0.f};
     // Stereo tuning: the right grip held, the right thumbstick's right/left sets the depth
     // (stronger/weaker), and in flight its up/down moves the eyes toward the craft / back (the
@@ -735,7 +770,11 @@ void updatePad() {
     SDL_SetJoystickVirtualAxis(s_joy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, axis(synced ? actFloat(TrigL) : 0.f));
     SDL_SetJoystickVirtualAxis(s_joy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, axis(synced ? actFloat(TrigR) : 0.f));
     auto button = [synced](SDL_GamepadButton b, bool down) { SDL_SetJoystickVirtualButton(s_joy, b, synced && down); };
-    button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, synced && actFloat(GripL) > 0.5f);
+    button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, gripL && !s_dpadMode);
+    button(SDL_GAMEPAD_BUTTON_DPAD_UP, dUp);
+    button(SDL_GAMEPAD_BUTTON_DPAD_DOWN, dDown);
+    button(SDL_GAMEPAD_BUTTON_DPAD_LEFT, dLeft);
+    button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT, dRight);
     button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, grip && !tuning);
     button(SDL_GAMEPAD_BUTTON_SOUTH, synced && actBool(BtnA));
     button(SDL_GAMEPAD_BUTTON_EAST, synced && actBool(BtnB));
@@ -745,7 +784,40 @@ void updatePad() {
     button(SDL_GAMEPAD_BUTTON_BACK, synced && actBool(ClickL));
     button(SDL_GAMEPAD_BUTTON_RIGHT_STICK, synced && actBool(ClickR));
     s_padLive = synced;
+    // a pending vibration (haptic, from the game's thread)
+    float amp, secs;
+    {
+        std::lock_guard lock(s_hapticMutex);
+        amp = s_hapticAmp;
+        secs = s_hapticSecs;
+        s_hapticAmp = s_hapticSecs = 0.f;
+    }
+    // (a weaker pulse does not cut a stronger one short: a laser shot during a death's rumble)
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= s_hapticUntil) s_hapticPlaying = 0.f;
+    if (synced && s_haptic && amp > 0.f && amp >= s_hapticPlaying) {
+        s_hapticPlaying = amp;
+        s_hapticUntil = now + std::chrono::microseconds(std::lround(double(secs) * 1e6));
+        XrHapticActionInfo hi{XR_TYPE_HAPTIC_ACTION_INFO};  // (no subaction path: both hands)
+        hi.action = s_haptic;
+        XrHapticVibration v{XR_TYPE_HAPTIC_VIBRATION};
+        v.amplitude = amp;
+        v.duration = XrDuration(double(secs) * 1e9);
+        v.frequency = XR_FREQUENCY_UNSPECIFIED;
+        xrApplyHapticFeedback(s_session, &hi, reinterpret_cast<const XrHapticBaseHeader*>(&v));
+    }
 }
+
+}  // namespace
+
+void haptic(float amplitude, float seconds) {
+    std::lock_guard lock(s_hapticMutex);
+    if (amplitude < s_hapticAmp) return;
+    s_hapticAmp = std::clamp(amplitude, 0.f, 1.f);
+    s_hapticSecs = seconds;
+}
+
+namespace {
 
 // (also while a cinematic is skipped: nothing is drawn but the window's "SKIPPING", ImGui too)
 bool menusUp() { return gfx::launcherShowing() || gfx::menuOpen() || cinematicSkip(); }
@@ -754,6 +826,14 @@ void onPresent(const wgpu::Device& device, const wgpu::Queue& queue, const wgpu:
                const wgpu::Texture& right, const wgpu::Texture& window, uint32_t frameNumber, void*) {
     pollEvents();
     updatePad();
+    if (frame) {  // (the game's frame: each eye's size in stereo)
+        static uint32_t lw = 0, lh = 0;
+        if (frame.GetWidth() != lw || frame.GetHeight() != lh) {
+            lw = frame.GetWidth();
+            lh = frame.GetHeight();
+            logf("xr", "game frame %ux%u%s", lw, lh, right ? " per eye" : "");
+        }
+    }
     if (!s_running || s_lost) return;
     // the launcher and the F1 menu are ImGui, drawn over the window only: the window's picture
     // then (its own shape, bars included); the game's frame otherwise (the internal resolution)
@@ -795,7 +875,7 @@ void onPresent(const wgpu::Device& device, const wgpu::Queue& queue, const wgpu:
                                                                XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &vn, vc)) &&
                 vn == 2)
                 s_eyeSize = std::max(vc[0].recommendedImageRectWidth, vc[0].recommendedImageRectHeight);
-            s_eyeSize = std::clamp(s_eyeSize ? s_eyeSize : 1600u, 512u, 2400u);
+            s_eyeSize = std::clamp(s_eyeSize ? s_eyeSize : 1600u, 512u, 4096u);
         }
         const uint32_t w = screen3d ? s_eyeSize * 2 : stereoFrame ? srcW * 2 : eyeW;
         const uint32_t h = screen3d ? s_eyeSize : srcH;
@@ -1014,6 +1094,16 @@ void start() {
 }
 
 bool active() { return s_running || s_fake; }
+bool enabled() { return s_session != XR_NULL_HANDLE || s_fake; }
+int recommendedEyeHeight() {
+    if (s_system == XR_NULL_SYSTEM_ID) return 0;
+    XrViewConfigurationView vc[2] = {{XR_TYPE_VIEW_CONFIGURATION_VIEW}, {XR_TYPE_VIEW_CONFIGURATION_VIEW}};
+    uint32_t n = 0;
+    if (XR_FAILED(xrEnumerateViewConfigurationViews(s_instance, s_system, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 2, &n,
+                                                    vc)) || n != 2)
+        return 0;
+    return int(vc[0].recommendedImageRectHeight);
+}
 
 void resetCameraZoom() {
     s_cameraForward = 0.f;

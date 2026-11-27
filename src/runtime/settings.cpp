@@ -80,6 +80,11 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "language") s.language = value == "es" ? 1 : 0;
     else if (key == "game_language") s.gameLanguage = value == "es" ? 1 : 0;
     else if (key == "spanish_disc_path") s.spanishDiscPath = value;
+    else if (key == "xr_resolution") {
+        // (a scale, as the first test build wrote it: 4.5 = 2160 lines)
+        const double v = atof(value.c_str());
+        s.xrResolution = v > 0.0 && v < 10.0 ? int(v * 480.0 + 0.5) : std::clamp(n, -1, 4096);
+    }
     else if (key == "xr_refresh_rate") s.xrRefreshRate = std::clamp(n, 0, 240);
     else if (key == "xr_stereo") s.xrStereo = parseBool(value);
     else if (key == "vr") s.vr = parseBool(value);
@@ -87,6 +92,7 @@ void set(const std::string& key, const std::string& value) {
     else if (key == "xr_screen_width") s.xrScreenWidth = std::clamp(float(atof(value.c_str())), 0.5f, 20.f);
     else if (key == "xr_screen_depth") s.xrScreenDepth = std::clamp(float(atof(value.c_str())), 0.f, 5000.f);
     else if (key == "xr_camera_forward") s.xrCameraForward = std::clamp(float(atof(value.c_str())), -200.f, 200.f);
+    else if (key == "audio_buffer") s.audioBuffer = std::clamp(n, 0, 2);
     else if (key == "speakers") {
         for (int i = 0; i < int(Speakers::Count); i++)
             if (value == speakersName(Speakers(i))) s.speakers = Speakers(i);
@@ -210,6 +216,8 @@ void load() {
         }
     }
     logf("config", "settings: %s", summary().c_str());
+    // R2_SAVE_SETTINGS=1: settings.ini written at once (a release's default one, from a fresh user folder)
+    if (const char* w = getenv("R2_SAVE_SETTINGS"); w && atoi(w)) save();
 }
 
 // every setting on one line, for the session log
@@ -284,6 +292,8 @@ void save() {
     fprintf(f, "vr=%d\n", s.vr);
     fprintf(f, "# VR: the headset's refresh rate (0: the runtime's own; 72, 80, 90, 120 Hz); the game keeps its own fps\n");
     fprintf(f, "xr_refresh_rate=%d\n", s.xrRefreshRate);
+    fprintf(f, "# VR: the game's resolution in the headset, lines per eye (0: the internal resolution, -1: the headset's own; 1728..3200)\n");
+    fprintf(f, "xr_resolution=%d\n", s.xrResolution);
     fprintf(f, "# the menu's language: en (English) or es (Spanish)\n");
     fprintf(f, "language=%s\n", s.language == 1 ? "es" : "en");
     fprintf(f, "# the game's texts, menus and voices: en, or es (needs the Spanish disc, GSWS64, beside the USA one or at spanish_disc_path)\n");
@@ -297,6 +307,8 @@ void save() {
     fprintf(f, "xr_screen_width=%g\n", s.xrScreenWidth);
     fprintf(f, "# auto (the system's speaker setup), stereo (Pro Logic II matrix-encoded), 5.1 or 7.1\n");
     fprintf(f, "speakers=%s\n", speakersName(s.speakers));
+    fprintf(f, "# the sound's buffer: 0 normal (50 ms), 1 large (100 ms), 2 huge (160 ms; choppy sound on a slower PC)\n");
+    fprintf(f, "audio_buffer=%d\n", s.audioBuffer);
     fprintf(f, "skip_logos=%d\n", s.skipLogos);
     fprintf(f, "skip_cutscenes=%d\n", s.skipCutscenes);
     fprintf(f, "# disc reads at SSD speed rather than the GameCube drive's 3 MB/s (shorter loading)\n");

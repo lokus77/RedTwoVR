@@ -69,6 +69,11 @@ struct Settings {
     // 80, 90 or 120 Hz. The game still runs at its own rate (fps); the runtime fills the headset's
     // frames in between from the last one, turned with the head.
     int xrRefreshRate = 0;
+    // VR: what the game renders at while in the headset (each eye in flight, the virtual screen
+    // otherwise), in lines per eye: 0 = the Display page's internal resolution, -1 = what the
+    // headset's OpenXR runtime recommends, else 1728..3200 (Virtual Desktop's Quest 3 / Pico 4
+    // levels, low to godlike)
+    int xrResolution = 0;
     // VR: start in the headset (OpenXR) as --xr does; --no-xr starts on the monitor anyway
     bool vr = false;
     // Stereo 3D in flight (off: the game on a flat virtual screen all the time); from the next start
@@ -120,6 +125,9 @@ struct Settings {
     int volume = 100;            // master volume, 0..100 (output gain (volume/100)^2)
     bool backgroundAudio = true;  // keep playing while the window is in the background
     Speakers speakers = Speakers::Auto;
+    // the sound's cushion (audio.cpp): 0 normal (50 ms), 1 large (100 ms), 2 huge (160 ms); more
+    // rides out a slower PC's late frames without crackling, a little later behind the picture
+    int audioBuffer = 0;
     // game
     bool skipLogos = false;      // boot straight past the legal screen, intro and logos
     bool skipCutscenes = false;  // B (or Start) skips the opening crawl and in-game cutscenes

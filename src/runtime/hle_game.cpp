@@ -183,6 +183,37 @@ void hle_GameFrameDelta(Ctx& c) {
     } else {
         setAudioSpeed(1.0, false);
     }
+    // VR haptics (both Touch controllers): firing - faint for a laser shot, hard for a secondary
+    // weapon (torpedoes, missiles, bombs) - from the mission's stats (0x7FDF04F0, see
+    // hle_MissionResults: +0x00 laser shots fired, +0x04 the others, a death: hle_CraftDestroy);
+    // damage from the craft's health (+0x6F4, read before the invincibility
+    // cheat fills it back), stronger the bigger the hit.
+    {
+        const bool play = rd32(0x7FDE8668) == 0 && !s_skip && !cinematic;
+        static u32 lasers = 0, others = 0, hpCraft = 0;
+        static float hp = 0.f, hpFull = 0.f;
+        constexpr u32 kStats = 0x7FDF04F0;
+        const u32 l = rd32(kStats), o = rd32(kStats + 4);
+        if (play && flyingFrames > 1) {
+            if (o > others && o - others < 16) xr::haptic(1.0f, 0.4f);
+            else if (l > lasers && l - lasers < 16) xr::haptic(0.12f, 0.03f);
+        }
+        lasers = l;
+        others = o;
+        const bool flying = craft && rd32(craft + 0x370) == 0;
+        const float h = flying ? float(s2d(rd32(craft + 0x6F4))) : 0.f;
+        if (!flying || craft != hpCraft || !(h > 0.f && h <= 100000.f)) {
+            hpCraft = flying ? craft : 0;
+            hp = hpFull = flying && h > 0.f && h <= 100000.f ? h : 0.f;
+        } else {
+            if (play && hpFull > 0.f && h < hp - 0.01f) {
+                const float hit = (hp - h) / hpFull;  // (a fraction of the craft's full health)
+                xr::haptic(std::clamp(0.4f + hit * 3.f, 0.4f, 0.9f), std::clamp(0.1f + hit * 1.5f, 0.1f, 0.35f));
+            }
+            hp = h;
+            hpFull = std::max(hpFull, h);
+        }
+    }
     keepHealth();
     keepAmmo();
     // R2_MISSION_WIN=<seconds>[:<n>[:<r>]] (tests: a mission's end without flying it, e.g. Strike at
@@ -1175,6 +1206,8 @@ void hle_MissionMedal(Ctx& c) {
 // (0x7FDEFE14) is spared.
 void hle_CraftDestroy(Ctx& c) {
     if (settings::get().invincible && c.r[3] == rd32(0x7FDEFE14)) return;
+    // (VR: the controllers rumble for 2 s as the player's craft blows up)
+    if (c.r[3] == rd32(0x7FDEFE14)) xr::haptic(1.0f, 2.0f);
     f_7FC3E528_orig(c);
 }
 

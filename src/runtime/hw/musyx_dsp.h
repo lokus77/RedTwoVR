@@ -29,6 +29,8 @@ void setGain(float gain);
 // The speakers setting (settings::Speakers): the output reopens with 2, 6 or 8 channels when that
 // changes what it should be.
 void setSpeakers(int speakers);
+// The audio_buffer setting (0 normal, 1 large, 2 huge): the cushion playback keeps
+void setBuffer(int level);
 int outputChannels();  // what the output plays (or would, with no device): 2, 6 or 8
 void deviceEvent(const void* sdlEvent);  // every SDL event: playback devices come and go
 std::string perfText();                 // what was played since the last call (perf lines)

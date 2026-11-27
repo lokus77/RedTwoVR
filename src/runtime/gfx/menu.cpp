@@ -991,7 +991,7 @@ bool confirmRow(const char* text, const char* caption, const char* again, bool& 
 // (the game disc's page and the browser come further down)
 bool discReady();
 void discPageOpen();
-void pageDisc();
+void pageDisc(settings::Settings& s);
 bool discPageShown();
 bool discBrowserShown();
 std::string discRowText();
@@ -1103,13 +1103,26 @@ void updatePoll() {
     }
 }
 
+// the menu's language (also on the disc page: a first start, before there is a disc)
+void languageRow(settings::Settings& s) {
+    const bool sel = rowBegin("Language", "The language of this menu (the launcher and the in-game menu). The game's "
+                                          "own language: Game language.");
+    static const char* const names[] = {"English", "Español"};
+    const int cur = std::clamp(s.language, 0, 1);
+    const int next = choiceStep(cur, 2, selector("Language", names[cur], cur > 0, cur < 1, sel), sel);
+    if (next != cur) {
+        s.language = next;
+        s_changed = true;
+    }
+}
+
 void pageDisplay(settings::Settings& s) {
     if (discBrowserShown()) {
         pageBrowse(s);
         return;
     }
     if (discPageShown()) {
-        pageDisc();
+        pageDisc(s);
         return;
     }
     updateSection();
@@ -1144,17 +1157,7 @@ void pageDisplay(settings::Settings& s) {
                              : "Your Rogue Leader disc image: where it is, or choose another (from the next start).",
                   discReady() ? kText : kAmber))
         discPageOpen();
-    {
-        const bool sel = rowBegin("Language", "The language of this menu (the launcher and the in-game menu). The game's "
-                                              "own language: Game language.");
-        static const char* const names[] = {"English", "Español"};
-        const int cur = std::clamp(s.language, 0, 1);
-        const int next = choiceStep(cur, 2, selector("Language", names[cur], cur > 0, cur < 1, sel), sel);
-        if (next != cur) {
-            s.language = next;
-            s_changed = true;
-        }
-    }
+    languageRow(s);
     {
         const bool sel = rowBegin("Game language", "The game's texts, menus and radio voices. Spanish needs, in the same "
                                                    "folder as the USA disc, your disc of the Spanish release (GSWS64) or the "
@@ -1275,6 +1278,9 @@ const char* speakersLabel(settings::Speakers sp) {
     }
 }
 
+template <typename T>
+bool valueRow(const char* text, T& v, const T* values, const char* const* labels, int n, const char* help);  // (below)
+
 void pageAudio(settings::Settings& s) {
     heading("VOLUME");
     if (percentRow("Master volume", s.volume,
@@ -1287,6 +1293,16 @@ void pageAudio(settings::Settings& s) {
                 "7.1 play it on speakers of their own (the game's sound setting must be STEREO, not MONO).")) {
         s_changed = true;
         audio::setSpeakers(int(s.speakers));
+    }
+    {
+        static const int levels[] = {0, 1, 2};
+        static const char* const labels[] = {"NORMAL", "LARGE", "HUGE"};
+        if (valueRow("Audio buffer", s.audioBuffer, levels, labels, 3,
+                     "How much sound is kept ready ahead (50, 100 or 160 ms). If the sound crackles or cuts out, a "
+                     "larger buffer rides out the moments the PC falls behind; the sound comes a little later.")) {
+            s_changed = true;
+            audio::setBuffer(s.audioBuffer);
+        }
     }
     if (toggleRow("Sound in background", s.backgroundAudio,
                   "Keep playing sound while another window has the focus. Off: silent until you come back."))
@@ -1356,7 +1372,7 @@ bool textRow(const char* text, std::string& value, bool password, const char* he
         const bool clicked = ImGui::InvisibleButton("##textbox", ImVec2(w, h));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         valueFrame(dl, p, ImVec2(p.x + w, p.y + h), sel, ImGui::IsItemHovered());
-        std::string shown = value.empty() ? std::string(sel ? "PRESS A / ENTER TO TYPE" : "-")
+        std::string shown = value.empty() ? std::string(sel ? loc("PRESS A / ENTER TO TYPE") : "-")
                                           : password ? std::string(std::min<size_t>(value.size(), 24), '*') : value;
         // a long value (a path) shows its end: "...\Rogue Leader (USA).rvz"
         const float room = w - 28.f * s_ui;
@@ -1894,7 +1910,7 @@ void drawDiscIcon(ImDrawList* dl, ImVec2 c, float r, bool ready) {
     dl->AddCircle(c, r * 0.3f, alpha(col, 160), 24, 1.5f * s_ui);
 }
 
-void pageDisc() {
+void pageDisc(settings::Settings& s) {
     discDialogPoll();
     const bool ready = discReady();
     heading("GAME DISC");
@@ -1911,7 +1927,7 @@ void pageDisc() {
         drawText(dl, s_fontBig ? s_fontBig : s_font, 30.f * s_ui, ImVec2(tx, p.y + 14.f * s_ui), ready ? kGold : kAmber,
                  title, 3.f * s_ui);
         const std::string line1 = ready ? s_discWhat
-                                  : s_discPath.empty() ? std::string("Choose your Rogue Leader disc image below.")
+                                  : s_discPath.empty() ? std::string(loc("Choose your Rogue Leader disc image below."))
                                                        : s_discProblem;
         const float px1 = ImGui::GetFontSize() * 0.8f, px2 = ImGui::GetFontSize() * 0.7f;
         dl->AddText(ImGui::GetFont(), px1, ImVec2(tx, p.y + 56.f * s_ui), kText,
@@ -1947,11 +1963,12 @@ void pageDisc() {
     if ((!s_launcher || ready) &&
         buttonRow(s_launcher ? "Other settings" : "Back", "DONE", "Back to the rest of this page (B / Esc too)."))
         discPageClose();
+    languageRow(s);
     ImGui::Dummy(ImVec2(0, 8.f * s_ui));
     ImGui::PushStyleColor(ImGuiCol_Text, vec(kDim));
-    ImGui::TextWrapped("Red Two plays from your own disc image of Star Wars: Rogue Squadron II - Rogue Leader for the "
+    ImGui::TextWrapped("%s", loc("Red Two plays from your own disc image of Star Wars: Rogue Squadron II - Rogue Leader for the "
                        "GameCube (USA, GSWE64, revision 0): an .iso, .gcm, .rvz or .wia file, as Dolphin uses them. "
-                       "Choose it once; Red Two remembers where it is.");
+                       "Choose it once; Red Two remembers where it is."));
     ImGui::PopStyleColor();
 }
 
@@ -2542,6 +2559,17 @@ void pageVr(settings::Settings& s) {
                      "between, turned with your head. Applies at once in the headset."))
             s_changed = vr = true;
     }
+    {
+        static const int lines[] = {0, -1, 1728, 2016, 2240, 2400, 2560, 2720, 2880, 3040, 3200};
+        static const char* const labels[] = {"AS DISPLAY", "HEADSET'S OWN", "LOW (1728)", "MEDIUM (2016)", "2240",
+                                             "HIGH (2400)", "2560", "2720", "ULTRA (2880)", "3040", "GODLIKE (3200)"};
+        if (valueRow("Resolution", s.xrResolution, lines, labels, 11,
+                     "What the game renders at in the headset, in lines per eye (in flight; the virtual screen in the "
+                     "menus). Low to Godlike follow Virtual Desktop's levels for Quest 3 and Pico 4. Headset's own: "
+                     "what the OpenXR runtime asks for. As display: the Display page's internal resolution. Higher is "
+                     "sharper and asks more of the graphics card. Applies at once."))
+            s_changed = s_display = true;
+    }
     if (toggleRow("Stereo 3D in flight", s.xrStereo,
                   "On: in flight the world is around you in 3D, seen through your own eyes. Off: the game on a flat "
                   "virtual screen all the time. From the next start."))
@@ -2700,7 +2728,7 @@ bool drawMenu(settings::Settings& s, float t) {
     {
         const update::Status us = update::status();
         const bool news = us.phase == update::Phase::Available || us.phase == update::Phase::Ready;
-        const std::string ver = news ? loc("UPDATE ") + us.latest + loc(" AVAILABLE") : std::string(loc("VERSION ")) + update::version();
+        const std::string ver = news ? loc("UPDATE ") + us.latest + loc(" AVAILABLE") : std::string(loc("VERSION ")) + update::version() + " By LoKuS";
         const float vpx = 14.f * s_ui;
         drawText(bg, s_font, vpx, ImVec2(lamp.x - 22.f * s_ui - textWidth(s_font, vpx, ver.c_str(), 2.f * s_ui), lamp.y + 12.f * s_ui),
                  news ? kAmber : alpha(kDim, 150), ver.c_str(), 2.f * s_ui);
@@ -3158,7 +3186,20 @@ int uberShaderMode() {
 
 void applyDisplaySettings() {
     const settings::Settings& s = settings::get();
-    VISetFrameBufferScale(settings::resolutionScale(s.resolution));
+    // (in VR the VR page's resolution, lines per eye over the game's 480, unless it says the same
+    // as here)
+    float scale = settings::resolutionScale(s.resolution);
+    if (xr::enabled() && s.xrResolution != 0) {
+        const int lines = s.xrResolution < 0 ? xr::recommendedEyeHeight() : s.xrResolution;
+        if (lines > 0) scale = float(std::clamp(lines, 480, 4096)) / 480.f;
+    }
+    static float logged = -1.f;
+    if (scale != logged) {
+        logged = scale;
+        logf("gfx", "frame buffer scale %g (%s)", scale,
+             xr::enabled() && s.xrResolution != 0 ? "the VR page's resolution" : "the internal resolution");
+    }
+    VISetFrameBufferScale(scale);
     applyDisplayAspect();
     AuroraSetUberShaders(uberShaderMode());
     AuroraSetForcedAnisotropy(u16(s.anisotropy));  // (Aurora patch 0030)
