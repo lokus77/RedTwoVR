@@ -14,6 +14,10 @@ revision 0), both for the downloads and for your own build.
 `red_two.exe` is found by itself). The zip is portable (everything of yours stays in its `user`
 folder) and brings the Visual C++ runtime with it.
 
+## Video
+
+[![Watch the video](https://img.youtube.com/vi/utCDfpDxA8A/0.jpg)](https://www.youtube.com/watch?v=utCDfpDxA8A)
+
 ## Virtual reality
 
 - A headset with OpenXR running before you start: Virtual Desktop, Quest Link or SteamVR.

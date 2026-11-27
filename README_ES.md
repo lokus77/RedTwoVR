@@ -14,6 +14,10 @@ donde quieras y ejecuta `red_two.exe`; si no encuentra el disco, el launcher lo 
 `GSWE64.rvz` junto a `red_two.exe` se encuentra solo). El zip es portable (todo lo tuyo se queda en
 su carpeta `user`) y lleva el runtime de Visual C++.
 
+## Vídeo
+
+[![Ver el vídeo](https://img.youtube.com/vi/utCDfpDxA8A/0.jpg)](https://www.youtube.com/watch?v=utCDfpDxA8A)
+
 ## Realidad virtual
 
 - Un visor con OpenXR activo antes de arrancar: Virtual Desktop, Quest Link o SteamVR.
