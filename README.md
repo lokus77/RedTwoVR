@@ -1,31 +1,25 @@
 # Red Two
 
-[![release](https://img.shields.io/github/v/release/gminustwo/red_two?filter=v%2A&sort=semver&display_name=tag&label=release&color=orange)](https://github.com/gminustwo/red_two/releases/latest)
-[![downloads](https://img.shields.io/github/downloads/gminustwo/red_two/total?label=downloads&color=brightgreen)](https://github.com/gminustwo/red_two/releases)
-[![Discord](https://img.shields.io/discord/1574134109800894704?label=Discord&logo=discord&logoColor=white&color=5865F2)](https://discord.gg/cc65jQwbqG)
-[![Patreon](https://img.shields.io/badge/Patreon-support-F96854?logo=patreon&logoColor=white)](https://www.patreon.com/rengar1)
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/rengar12707)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/rengar)
+Version PCVR del recomp **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube).
 
-A static recompilation of **Star Wars: Rogue Squadron II – Rogue Leader** (GameCube) for PC.
+Basado en la versión 1.3 de Rengar https://github.com/gminustwo/red_two/releases/tag/v1.3
 
-The game's own PowerPC code is translated to C++ ahead of time and runs on a native runtime
-that stands in for the console's hardware. **No game data is included**: you need your own disc
-image of the USA release (`GSWE64`, revision 0), for the downloads as for your own build.
 
-**Downloads**: Windows (zip) and Linux / Steam Deck (AppImage) builds are on the
-[Releases](../../releases) page. They contain the game's code in recompiled form, none of its data:
-start it and choose your disc image (`.iso`, `.gcm`, `.rvz` or `.wia`, wherever it is) on the
-launcher's disc page: type or paste its path, pick it in the file dialog, or find it in the
-built-in browser (controller-friendly). Red Two remembers it; one next to the program is also
-found by itself.
-Or build Red Two yourself (below): the build recompiles the game from your disc. The Windows zip
-is portable (everything of yours stays in its `user` folder) and brings the Visual C++ runtime
-with it; it needs a CPU with AVX2 (Intel Haswell / AMD Ryzen or newer) and says so otherwise.
+**No se incluyen datos de juego**: necesitas tu propia imagen de disco de la versión estadounidense (`GSWE64`, revisión 0), tanto para las descargas como para tu propia compilación.
 
-> Status: playable on Windows and Linux (also packaged as an AppImage for the Steam Deck):
-> menus, cutscenes and missions at full speed with graphics (Aurora), sound (an emulation of the
-> MusyX audio DSP), controls, saving, save states, widescreen, mods, cheats and RetroAchievements.
+Esta versión admite jugar en Castellano, si utilizamos en una carpeta \red_two_es\ los ficheros extraídos de la rom spain de gamecube del juego.
+Se requieren: 
+frontendSP.bin
+resDir_rows.bin
+staticGame_sp.bin
+text_Spanish.bin
+voiceDir.bin
+r2voice.vdy
+
+Ocupan 132Mb.
+
+-Añadida opción de control eje Y invertido
+
 
 ## Building (Windows)
 
@@ -146,9 +140,6 @@ choose Open Anyway in System Settings > Privacy & Security (or run
   unlocks without typing codes - all missions, all tech upgrades, ace mode, art gallery, music
   hall, documentary, audio commentary, credits, black and white - kept in the game's save as
   if the codes had been entered.
-- **RetroAchievements** (F1 > Achievements): log in with your retroachievements.org account
-  (only the login token is stored) or take Dolphin's login; softcore only, so save states and
-  cheats stay usable. Unlocks pop up in the top right corner.
 - **Reset game**, **Back to launcher** and **Quit to desktop** are at the top of the menu's first page.
 - **Save states**: Back + RB saves, Back + LB loads, Back + D-pad right / left picks the slot
   (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
@@ -190,61 +181,10 @@ choose Open Anyway in System Settings > Privacy & Security (or run
   5.1 and 7.1 give the rear its own speakers (7.1 splits it into side and back pairs). Keep the
   game's own sound setting (Options > Sound Settings) on STEREO. `R2_NO_AUDIO=1` runs without
   sound.
-- **Updates**: at start Red Two asks GitHub whether a newer version is out and offers it at the top
-  of the menu's first page: download and install, then a restart into it, with your settings,
-  saves, states and texture packs kept (the download is checked against the release's
-  checksums). The AppImage replaces itself under the same name, so a Steam shortcut keeps
-  working. DISPLAY > Check for updates turns the check off; the version is under the menu's title.
-- **Discord**: with the Discord app open on the same PC, your Discord profile shows that you're
-  playing Red Two, the mission you're in (flying, paused or in a cutscene; the hangar, the menus,
-  the launcher) and for how long. Only the Discord app on your PC is told, nothing else is sent;
-  DISPLAY > Discord Rich Presence turns it off. DISPLAY > Red Two's Discord (in the launcher and
-  in game) opens the invite to [Red Two's Discord server](https://discord.gg/cc65jQwbqG) for chat
-  and news; bug reports go on GitHub Issues (see below).
-- Every session writes a log to the user folder's `logs` (Linux: `~/.local/share/Red Two/logs`),
+- Every session writes a log to the user folder's `logs` 
   also when another program starts Red Two (RecompLauncher, a terminal): that program gets a copy
   of it as well. `--console` shows it in a console window on Windows.
 
-## Reporting a problem
-
-Open an issue on the [Issues](../../issues/new/choose) page and pick **Bug report** (or **Feature
-request** for an idea): the form asks for what helps. Please check the open issues first, and
-report one problem per issue. What to have at hand:
-
-- **Red Two's version**: under the menu's title (F1, or the controller's Back / Select), e.g.
-  "VERSION 1.3". Newer versions may already fix it: the menu offers updates at the top of its
-  first page.
-- **What happened and where**: the mission (or menu, cutscene) and the moment, whether it happens
-  every time, and how to get there.
-- **The session log (required)**: a bug report needs the log of the play session where the
-  problem happened. Every start of Red Two writes a new one, named by the date and time it
-  started, so if you started Red Two again afterwards, the newest log is from that later start:
-  pick the right one by its date and time, and drag it into the issue. It's in:
-  - Windows: `user\logs` next to `red_two.exe` (an older install without a `user` folder:
-    `%APPDATA%\Red Two\logs`)
-  - Steam Deck / Linux: `~/.local/share/Red Two/logs`
-  - macOS: `~/Library/Application Support/Red Two/logs`
-
-  It lists your settings, the frame rate every 30 seconds, and what the game was doing in a
-  freeze or a crash. It also shows folder paths, which can include your user name: edit those
-  out if you like.
-- **Your setup**: the controller (and whether Steam starts Red Two), your display and aspect
-  ratio, a texture pack if you use one, your PC's CPU and graphics card.
-- **A screenshot or a short video** for anything you can see.
-
-A save state from just before the problem can help too, but states only load into the build that
-made them: mention that you have one, and we'll ask for it if needed.
-
-## How it works
-
-`tools/rvz.py` and `src/common/disc_image.cpp` read the disc; the recompiler (`src/recompiler`)
-finds the game's functions in `main.dol` without symbols and writes them out as C++ - including the
-second executable the game hides inside `main.dol` and runs from its own demand-paged virtual
-memory. The runtime (`src/runtime`) stands in for the console: the CPU state and MMU, threads on
-host fibers, the GameCube's hardware at the register level (video, disc, audio DSP, ARAM, memory
-card, controllers), and a bridge that hands the GPU command stream to
-[Aurora](https://github.com/encounter/aurora) for rendering. Names we gave the game's functions are
-in `config/GSWE64/symbols.txt`.
 
 ## Legal
 
