@@ -20,9 +20,11 @@ Ocupan 132Mb.
 
 -Añadida opción de control eje Y invertido
 
-https://www.youtube.com/shorts/utCDfpDxA8A
 
-[![Star Wars: Rogue Leader - Native PCVR]([https://img.youtube.com/vi/VIDEO_ID/0.jpg](https://img.youtube.com/vi/utCDfpDxA8A/0.jpg))](https://www.youtube.com/shorts/utCDfpDxA8A)
+
+VIDEO:
+
+[![Watch the video](https://img.youtube.com/vi/utCDfpDxA8A/0.jpg)](https://www.youtube.com/watch?v=utCDfpDxA8A)
 
 
 
