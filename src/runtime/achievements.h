@@ -41,6 +41,13 @@ void login(const std::string& user, const std::string& password);
 void logout();
 bool importDolphinLogin(std::string& message);  // Dolphin's RetroAchievements.ini (user + token)
 bool dolphinLoginAvailable();
+// Sign-in in the player's browser (ra_web_login.cpp): a page Red Two serves on 127.0.0.1 for 10
+// minutes; the name and password typed there go to login() on the game's thread.
+bool webLoginStart(std::string& url, std::string& error);  // starts it (or keeps it): its address
+void webLoginStop();
+bool webLoginRunning();
+void webLoginPoll();                                     // frame / idle: a login the page sent
+void webLoginResult(bool ok, const std::string& text);  // onLogin: what the page shows next
 
 struct Achievement {
     uint32_t id = 0;

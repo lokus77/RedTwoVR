@@ -216,7 +216,17 @@ uint32_t RC_CCONV readMemory(uint32_t addr, uint8_t* buf, uint32_t n, rc_client_
     return n;
 }
 
-void RC_CCONV logMessage(const char* msg, const rc_client_t*) { logf("ra", "%s", msg); }
+// rcheevos' messages. The log is meant to be attached to bug reports as it is, so it names no
+// account: rc_client's "Attempting to log in <user> (with password|token)" loses the name.
+void RC_CCONV logMessage(const char* msg, const rc_client_t*) {
+    static const char kLogin[] = "Attempting to log in ";
+    if (!strncmp(msg, kLogin, sizeof kLogin - 1)) {
+        const char* with = strstr(msg, " (with ");
+        logf("ra", "Attempting to log in%s", with ? with : "");
+        return;
+    }
+    logf("ra", "%s", msg);
+}
 
 std::string badgeUrl(const rc_client_achievement_t* a) {
     if (a->badge_url) return a->badge_url;
@@ -302,6 +312,7 @@ void RC_CCONV onLogin(int result, const char* error, rc_client_t* client, void*)
     const rc_client_user_t* u = rc_client_get_user_info(client);
     if (result != RC_OK || !u) {
         s_message = std::string("Login failed: ") + (error ? error : "?");  // (rc_client logs it)
+        webLoginResult(false, s_message);
         if (result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN) {
             settings::get().raToken.clear();  // a token that no longer works: log in again
             settings::save();
@@ -316,10 +327,12 @@ void RC_CCONV onLogin(int result, const char* error, rc_client_t* client, void*)
         settings::save();
     }
     s_message.clear();
-    logf("ra", "logged in as %s (%u softcore points)", u->display_name, u->score_softcore);
+    logf("ra", "logged in (%u softcore points)", u->score_softcore);  // (no account name in the log)
     char b[96];
     snprintf(b, sizeof b, "Logged in as %s (%u points).", u->display_name, u->score_softcore);
     popup("RETROACHIEVEMENTS", b);
+    webLoginResult(true, std::string("Signed in as ") + u->display_name +
+                             ". You can close this tab and go back to Red Two.");
     startGame();
 }
 
@@ -422,6 +435,7 @@ void frame() {
         replies.swap(s_replies);
     }
     for (auto& r : replies) r();
+    webLoginPoll();
     if (!settings::get().achievements) return;
     startGame();  // once both the login and the hash are there
     if (rc_client_is_game_loaded(s_client)) rc_client_do_frame(s_client);
@@ -438,6 +452,7 @@ void idle() {
         replies.swap(s_replies);
     }
     for (auto& r : replies) r();
+    webLoginPoll();
     if (!settings::get().achievements) return;
     startGame();
     rc_client_idle(s_client);

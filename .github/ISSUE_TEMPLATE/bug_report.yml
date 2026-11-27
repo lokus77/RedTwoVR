@@ -25,6 +25,8 @@ body:
         - Windows (the release zip)
         - Steam Deck (the AppImage)
         - Linux desktop (the AppImage)
+        - macOS (Apple Silicon)
+        - Android (the APK)
         - Built from source
     validations:
       required: true
@@ -56,6 +58,8 @@ body:
         **A bug report needs the log of the play session where the problem happened.** Every start of Red Two writes a new log, named by the date and time it started (`red_two_2026-11-19_18-36-22.log`). If you started Red Two again after the problem, the newest log is from that later start: pick the one from the session where it happened, by its date and time. Drag it into this box.
         - **Windows**: the `user\logs` folder next to `red_two.exe` (an older install without a `user` folder: `%APPDATA%\Red Two\logs`)
         - **Steam Deck / Linux**: `~/.local/share/Red Two/logs`
+        - **macOS**: `~/Library/Application Support/Red Two/logs`
+        - **Android**: `Android/data/io.github.gminustwo.redtwo/files/logs` (over USB from a PC)
 
         It lists your settings, the frame rate every 30 seconds, and what the game was doing in a freeze or a crash. It also shows folder paths, which can include your user name: edit those out if you like.
       placeholder: "Drop red_two_<date>_<time>.log here"

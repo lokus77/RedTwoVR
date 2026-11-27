@@ -432,6 +432,17 @@ void safepoint(Ctx& c, u32 pc) {
         decAck();
         deliverException(c, 8, pc);
     }
+    // audio blocks that are due start here at once, each with its interrupt, instead of waiting
+    // for the timer thread (hw.cpp onAi: catch-up after a V-Sync wait or a host stall; ZeDctr's
+    // Red Two Plus fork)
+    for (int n = 0; n < 24 && (c.msr & kMsrEE) && aiCatchUpPending(); n++) {
+        if (piPending()) {
+            deliverException(c, 4, pc);
+            continue;
+        }
+        if (!aiCatchUpStep()) break;
+        if (piPending()) deliverException(c, 4, pc);
+    }
     // more to take once the handler is done (it runs with interrupts off)
     if (g_irqLine && (c.msr & kMsrEE)) g_irqPending = 1;
 }

@@ -103,4 +103,19 @@ void hle_OSPanic(Ctx& c) {
 
 void hle_PPCHalt(Ctx& c) { fatal("the game halted (PPCHalt, called from %08X)", c.lr); }
 
+// The SDK's __AI_SRC_INIT (AIInit, AISetDSPSampleRate, the stream rate setter): times one tick of
+// the streaming sample counter at 48 kHz right after one at 32 kHz with OSGetTime and retries
+// until it lands in one of two windows (a check of the audio chip's sample rate converter). The
+// guest's clock is the host's, so the time between two register writes is the host's too: under
+// arm64 translation (Android's x86_64 emulators) each try took ~7,000 ticks against the windows'
+// 1,155 / 1,580, and the boot never got past AIInit. Nothing comes out of it but the AI control
+// register it leaves: sample counter reset, streaming stopped, 32 kHz.
+void hle_AISrcInit(Ctx&) {
+    constexpr u32 kAiCr = 0xCC006C00;
+    static bool logged = false;
+    if (!logged) logged = true, logf("audio", "AI sample rate converter check skipped (__AI_SRC_INIT)");
+    wr32(kAiCr, (rd32(kAiCr) & ~0x20u) | 0x20u);  // SCRESET
+    wr32(kAiCr, rd32(kAiCr) & ~0x03u);           // 32 kHz, PSTAT off
+}
+
 }  // namespace rt

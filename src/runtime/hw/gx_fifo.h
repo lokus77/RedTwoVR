@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+
 #include "../ctx.h"
 
 namespace rt {
@@ -29,6 +31,7 @@ u32 gxPiRead(u32 off);
 void gxPiWrite(u32 off, u32 v);
 void gxResetGatherPipe();  // WPAR write
 void gxFlushGatherPipe();  // PPCSync: drain a partly filled gather buffer
+std::string gxFifoText();  // the FIFOs' pointers and breakpoint, for stall reports
 
 // PE events raised by the stream
 void peToken(u16 token, bool irq);

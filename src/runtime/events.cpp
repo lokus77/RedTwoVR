@@ -181,11 +181,18 @@ void eventsInit() {
 
 void schedule(int id, u64 at) {
     if (!at) at = 1;
-    std::lock_guard lk(s_mu);
-    s_due[id] = at;
-    const u64 before = s_earliest.load();
-    recomputeEarliest();
-    if (s_earliest.load() < before) wakeTimer();
+    bool dueNow;
+    {
+        std::lock_guard lk(s_mu);
+        s_due[id] = at;
+        const u64 before = s_earliest.load();
+        recomputeEarliest();
+        if (s_earliest.load() < before) wakeTimer();
+        dueNow = at <= tbNow();
+    }
+    // already due: the guest's next safepoint runs it, not the timer thread's next pass (up to
+    // 0.2 ms later; ZeDctr's Red Two Plus fork)
+    if (dueNow) raisePending();
 }
 
 void unschedule(int id) {

@@ -72,10 +72,14 @@ static long gettid() {  // (macOS has no gettid: the thread's system-wide id)
 #include "savestate.h"
 #include "table.h"
 
-#if !defined(_WIN32) && !defined(__ANDROID__)
-// This program's file (Linux: /proc/self/exe; macOS: the loader's, inside Red Two.app)
+#if !defined(_WIN32)
+// This program's file (Linux: /proc/self/exe; macOS: the loader's, inside Red Two.app; Android:
+// libmain.so, the process itself being the system's app_process)
 static std::string selfExe() {
-#ifdef __APPLE__
+#if defined(__ANDROID__)
+    Dl_info info{};
+    return dladdr(reinterpret_cast<void*>(&selfExe), &info) && info.dli_fname ? info.dli_fname : "";
+#elif defined(__APPLE__)
     char buf[PATH_MAX];
     uint32_t size = sizeof buf;
     if (_NSGetExecutablePath(buf, &size) != 0) return {};

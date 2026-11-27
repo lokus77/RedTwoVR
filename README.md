@@ -33,7 +33,7 @@ powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Disc "<your Rogue Lead
 build\windows\red_two.exe --disc "<your Rogue Leader.rvz>"
 ```
 
-Without `--disc` the game takes the disc chosen in the launcher before (F1 > DISPLAY > Game disc),
+Without `--disc` the game takes the disc chosen in the launcher before (F1 > GAME > Game disc),
 else looks for `orig\GSWE64.iso`, `orig\GSWE64.rvz`, `GSWE64.rvz`, `GSWE64.iso` and any GSWE64
 image next to the program or in the user folder, else the launcher asks for it.
 `tools\rvz.py` (Python + libzstd) can still extract a disc or convert it to ISO.
@@ -45,6 +45,18 @@ symbols, DLLs, a readme) for your own use on another PC.
 
 
 
+### Android (experimental)
+
+The APK (`RedTwo-v<version>-android-arm64.apk`) is for 64-bit ARM phones and handhelds with
+Vulkan 1.1 (Android 10 or newer). It is new and has had little testing on real devices: reports
+are welcome. Install it (your phone asks to allow installs from that app), start Red Two and
+choose your disc image in the system's file picker, or copy it into
+`Android/data/io.github.gminustwo.redtwo/files` over USB first. A controller works, and touch
+controls are on screen; the back button or gesture opens the menu. Settings, the memory card,
+save states and logs are in that same folder. A save state loads only in the session that made
+it (the game's own saves on the memory card are not affected). Updates: the menu says when a new
+version is out and opens its page; install the new APK over the old one.
+
 ### Playing
 
 - **Launcher**: Red Two opens on its settings (the same pages as the in-game menu) before the
@@ -54,24 +66,27 @@ symbols, DLLs, a readme) for your own use on another PC.
   the setting for one start. A reset from the menu goes straight back into the game.
 - Gamepads work through SDL (with rumble), also while the window is in the background. On an
   Xbox-style pad the face buttons follow the GameCube positions: A = A (fire), X (left) = B,
-  B (right) = X, Y = Y; LT/RT = L/R, RB = Z, right stick = C-stick, Menu = Start (a PlayStation
+  B (right) = X, Y = Y; LT/RT = L/R (throttle and brake), LB and RB = Z (hold with the stick to roll),
+  right stick = C-stick, Menu = Start (a PlayStation
   controller: cross = A, circle = B, square = X, triangle = Y). Keyboard: WASD or arrows steer, Space = A (fire),
   Left Shift = B, E = X, Q = Y, R = Z, 1/2 = L/R, Enter = Start, IJKL = C-stick, TFGH = D-pad.
 - The game's button prompts show your controller's buttons (the one each GameCube button is
   bound to, e.g. "PRESS (Y)" and SELECT CRAFT's "(B) > pilot"): the PlayStation symbols on a
-  PS3 / PS4 / PS5 controller, the Xbox buttons on any other. F1 > Controls > Button prompts
-  picks Automatic, Xbox, PlayStation or the original GameCube ones. The C-stick icon stays.
+  PS3 / PS4 / PS5 controller, the Switch letters on a Switch Pro Controller or Joy-Cons, the Xbox
+  buttons on any other, and SELECT CRAFT's C-stick becomes the right stick. F1 > Controls >
+  Button prompts picks Automatic, Xbox, PlayStation, Switch or the original GameCube ones.
 - **Sticks** (F1 > Controls): the control stick and the C-stick each have a sensitivity (25-200%)
   and a round deadzone (0-50%; the output grows from zero at its edge), and the stick's whole
   travel past the deadzone is the game's range. **Response** sets how the craft's turning follows
-  the control stick: Smooth (default: gentle near the center, building up evenly to full speed),
-  Linear, or the game's own GameCube curve. A meter for each stick shows where it is and what the
-  game gets (the turn and pitch speed for the control stick).
+  the control stick: the game's own GameCube curve (default), Smooth (gentle near the center,
+  building up evenly to full speed) or Linear. A meter for each stick shows where it is and what the
+  game gets (the turn and pitch speed for the control stick). **Invert Y axis** makes the stick climb when
+  pushed up and dive when pulled down, in flight only (the menus keep up = up).
 - **Triggers**: L and R are analog, as on a GameCube controller: throttle and brake build up over
-  the whole pull, and the click at the end gives full boost or full brake. **Trigger clicks on LB /
-  RB** (Controls) moves the clicks to the bumpers, so the triggers only throttle and brake (Z then
-  moves to the right stick click). Bars on the Controls page show both triggers and what the game
-  gets.
+  the whole pull, and the click at the end gives full boost or full brake. **Move trigger clicks to
+  LB / RB** (Controls) puts the clicks on the bumpers instead, so the triggers only throttle and
+  brake (roll, Z, then moves to the right stick click). Bars on the Controls page show both
+  triggers and what the game gets.
 - **Gyro aiming** (Controls): turn and tilt the controller to steer in flight, on top of the stick,
   with the Steam Deck, a DualSense, DualShock 4 or Switch Pro Controller (Xbox controllers have no
   gyro): always on, while a button is held, toggled, or off while held - the Deck's left stick
@@ -81,11 +96,20 @@ symbols, DLLs, a readme) for your own use on another PC.
 - **Graphics** (F1, DISPLAY): internal resolution up to 4K, 4x MSAA anti-aliasing (from the next
   start; WebGPU offers no other sample count) and anisotropic filtering up to 16x. **Widescreen**
   (16:9, 16:10, 21:9 or the window's shape) widens the 3D view, puts the flight HUD at the screen
-  edges and fills the screen in cutscenes; wider windows get bars at the sides. **Frame rate**: 60,
+  edges and fills the screen in cutscenes (**Cinematic bars** keeps them in their 2.1:1 cinema
+  frame with black bars instead); wider windows get bars at the sides. **Frame rate**: 60,
   90, 120 or 144 frames a second, the game at its normal speed. **V-Sync** (off by default) shows
   each frame in step with the display's refresh: no tearing, a little more input lag. With it on, a
   frame rate at or above the display's refresh runs at the refresh (144 on a 120 Hz display: 120),
   and cutscene skips still run at full speed.
+- **Cutscenes** (F1, GAMEPLAY): with Skippable cutscenes on, hold B for 2 seconds in the opening
+  crawl or a cutscene to skip it (a ring in the corner fills while you hold); holding B also skips
+  the intro at start. Skip intro logos reaches the title in about 10 seconds by itself.
+- **Special Features**: the documentary and the teaser play at their own speed at any frame rate;
+  left / right jumps 5 seconds, and A, B or START pauses them (CONTINUE / BACK). While the audio
+  commentary plays in a mission, L3 (keyboard C; F1 > Controls > Hotkeys) pauses it.
+- **The mouse** works in the game's own menus: point at an item to select it, click for A, right
+  click for B, and the wheel moves up and down (also on the pause screen and in the art gallery).
 - **Loading**: Fast loading (Gameplay, on) reads the disc at SSD speed instead of the GameCube
   drive's 3 MB/s. The disc image is read ahead of the game on a thread of its own, so it can sit on
   a hard disk or a network drive without the game stuttering while it streams music and voices.
@@ -94,7 +118,7 @@ symbols, DLLs, a readme) for your own use on another PC.
   so the folder can live anywhere (another drive, a NAS). An install that has no `user` folder
   but an older `%APPDATA%\Red Two` keeps using that one; create `user` to make it portable (its
   first start copies the settings, controls and memory card over). Linux: `~/.local/share/Red Two/`;
-  macOS: `~/Library/Application Support/Red Two/`.
+  macOS: `~/Library/Application Support/Red Two/`; Android: `Android/data/io.github.gminustwo.redtwo/files`.
 - **Cheats** (F1 > Cheats): invincibility, infinite lives, infinite bombs, perfect mission
   stats (the results screen says 0:01, every enemy destroyed, 100% accuracy, no friendlies or
   lives lost and 100% targeting computer efficiency, and the medal is awarded for those), and
@@ -102,7 +126,7 @@ symbols, DLLs, a readme) for your own use on another PC.
   unlocks without typing codes - all missions, all tech upgrades, ace mode, art gallery, music
   hall, documentary, audio commentary, credits, black and white - kept in the game's save as
   if the codes had been entered.
-- **Reset game**, **Back to launcher** and **Quit to desktop** are at the top of the menu's first page.
+- **Reset game**, **Back to launcher** and **Quit to desktop** are on the menu's first tab, GAME.
 - **Save states**: Back + RB saves, Back + LB loads, Back + D-pad right / left picks the slot
   (8 slots; keyboard F5 / F8, F7 / F6). F1 > Controls has the slot, save / load buttons and the
   hotkeys, each any combination of buttons (or keys) held together: pick the row, press A, hold
@@ -110,7 +134,8 @@ symbols, DLLs, a readme) for your own use on another PC.
   opens the menu. States live in the user folder's `states` and also load after a restart, but
   only into the same build of Red Two (a rebuild makes them "OLD"). The memory card is not part
   of a state: loading one does not undo the game's own saves.
-- Saves go to the user folder's `saves/GSWE64_A.raw` (slot A; the game formats a new card). A
+- Saves go to the user folder's `saves/GSWE64_A.raw` (slot A; a new card comes formatted and the
+  game makes its save at the first start without asking). A
   `.raw` card from Dolphin or Nintendont can be copied there as it is, whatever its size (59 to
   2043 blocks). `R2_CARD_A=<path>` uses another card image.
 - **Mods** (F1, MODS tab): texture packs in Dolphin's format go in the user folder's
@@ -147,6 +172,13 @@ symbols, DLLs, a readme) for your own use on another PC.
   also when another program starts Red Two (RecompLauncher, a terminal): that program gets a copy
   of it as well. `--console` shows it in a console window on Windows.
 
+
+## Credits
+
+Some features come from ZeDctr's [Red Two Plus](https://github.com/ZeDctr/red_two_plus) fork:
+hold-to-skip cutscenes, the documentary's speed fix, seeking and pause menu, Switch button
+prompts, the memory card's first save, pausing the audio commentary, the mouse in the game's menus,
+cinematic bars and faster audio catch-up. Rendering is [Aurora](https://github.com/encounter/aurora)'s.
 
 ## Legal
 

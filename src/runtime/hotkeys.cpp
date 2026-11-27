@@ -17,8 +17,11 @@
 #include <SDL3/SDL_keyboard.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
+#include "gyro.h"
 #include "hw/gx_fifo.h"
 #include "mods.h"
 #include "runtime.h"
@@ -198,6 +201,7 @@ void fire(int action) {
         break;
     }
     case settings::HkToggleTextures: gfx::toast(mods::toggleTexturesShown()); break;
+    case settings::HkCommentary: commentaryToggle(); break;  // (hle_game.cpp, at the game's next frame)
     default: break;
     }
 }
@@ -239,7 +243,7 @@ void selfTest() {
         bool down;
         const char* what;
     };
-    // R2_HOTKEY_TEST_BIND=1 (with R2_MENU=1 R2_MENU_SECTION=3 R2_MENU_PAD=1 R2_MENU_ROW=13): A on
+    // R2_HOTKEY_TEST_BIND=1 (with R2_MENU=1 R2_MENU_SECTION=4 R2_MENU_PAD=1 R2_MENU_ROW=14): A on
     // the save state row, then Back + left trigger: the new combination
     static const bool bind = envFlag("R2_HOTKEY_TEST_BIND");
     if (bind) {
@@ -306,6 +310,17 @@ void tick() {
             fire(settings::HkToggleTextures);
         }
     }
+    // R2_COMMENTARY_TEST=<seconds>[,<seconds>...]: the commentary hotkey's action at those times
+    if (static const char* ct = getenv("R2_COMMENTARY_TEST"); ct) {
+        static const u64 t0 = tbNow();
+        static const char* next = ct;
+        if (next && *next && double(tbNow() - t0) / double(kTbClock) >= atof(next)) {
+            logf("hotkey", "commentary test");
+            fire(settings::HkCommentary);
+            const char* comma = strchr(next, ',');
+            next = comma ? comma + 1 : nullptr;
+        }
+    }
     selfTest();
     refreshModifiers();
     const bool enabled = !gfx::menuOpen() && !s_cap.active && (!automated() || test);
@@ -320,10 +335,18 @@ void tick() {
             for (int o = 0; o < settings::HkCount && !covered; o++)
                 covered = o != a && sat[o][d] && combo(o, d).size() > combo(a, d).size() && contains(combo(o, d), combo(a, d));
             if (covered) continue;
+            // the commentary's L3 is also the gyro button of a controller without stick touch or a
+            // touchpad (a Switch Pro Controller): with gyro aiming on, the gyro keeps it
+            if (a == settings::HkCommentary && d == 0 && settings::get().gyroMode != settings::GyroMode::Off) {
+                const int g = gyro::effectiveButton();
+                if (g >= 0 && combo(a, d).size() == 1 && combo(a, d)[0] == SDL_GetGamepadButtonFromString(gyro::kButtons[g].sdlName))
+                    continue;
+            }
             logf("hotkey", "%s: %s", label(a, d == 0).c_str(),
                  a == settings::HkSaveState         ? "save state"
                  : a == settings::HkLoadState      ? "load state"
                  : a == settings::HkToggleTextures ? "texture packs"
+                 : a == settings::HkCommentary     ? "audio commentary"
                                                    : "slot");
             fire(a);
             if (d == 0) s_mutedUntilUp = combo(a, d);

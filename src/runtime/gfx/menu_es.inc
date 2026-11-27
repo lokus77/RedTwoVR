@@ -1,7 +1,7 @@
 // The menu in Spanish (gfx/menu.cpp loc): {English as written in menu.cpp, Spanish}. Generated
 // from a table of translations; a text missing here shows in English.
 {"DISPLAY", "PANTALLA"},
-{"GAMEPLAY", "JUEGO"},
+{"GAMEPLAY", "PARTIDA"},
 {"AUDIO", "AUDIO"},
 {"CONTROLS", "CONTROLES"},
 {"CHEATS", "TRUCOS"},
@@ -128,6 +128,17 @@
 {"Speakers", "Altavoces"},
 {"Stereo plays the game's Pro Logic II surround matrix-encoded, for a receiver's decoder. 5.1 and 7.1 play it on speakers of their own (the game's sound setting must be STEREO, not MONO).", "Estéreo reproduce el envolvente Pro Logic II del juego codificado en matriz, para el decodificador de un receptor. 5.1 y 7.1 lo reproducen en altavoces propios (el sonido del juego debe estar en STEREO, no en MONO)."},
 {"Sound in background", "Sonido en segundo plano"},
+// Red Two 1.4
+{"Back", "Atrás"},
+{"Cinematic bars", "Barras de cine"},
+{"Widescreen: cutscenes, the opening crawl and the credits keep their 2.1:1 cinema frame with black bars instead of filling the screen.", "Pantalla panorámica: las cinemáticas, el texto inicial y los créditos mantienen su encuadre de cine 2.1:1 con barras negras en lugar de llenar la pantalla."},
+{"Hold B for 2 seconds during the opening crawl or a cutscene to skip it.", "Mantén B 2 segundos durante el texto inicial o una cinemática para saltarla."},
+{"Move trigger clicks to LB / RB", "Clics de gatillo a LB / RB"},
+{"A GameCube trigger clicks at the end of its pull: full boost (wings closed, no firing) or full brake. Off: LT / RT click at the end of their pull, as on a GameCube, and LB / RB roll (Z, held with the stick). On: LT / RT only throttle and brake, LB / RB give the clicks (as players set up in Dolphin), and roll moves to the right stick click. Changes the controller's bindings below.", "Un gatillo de GameCube hace clic al final de su recorrido: turbo a fondo (alas cerradas, sin disparar) o freno a fondo. No: LT / RT hacen clic al final, como en GameCube, y LB / RB giran (Z, con el stick). Sí: LT / RT solo aceleran y frenan, LB / RB dan los clics (como se configura en Dolphin) y el giro pasa al clic del stick derecho. Cambia las asignaciones del mando de abajo."},
+{"How fast the craft turns for how far the stick goes. GameCube (default): the game's own curve, half speed up to 80% of the stick, then a jump to full. Smooth: gentle near the center, building up evenly to full speed. Linear: in proportion to the stick.", "Cuánto gira la nave según cuánto mueves el stick. GameCube (por defecto): la curva del propio juego, media velocidad hasta el 80% del stick y luego un salto a la máxima. Suave: lento cerca del centro y subiendo poco a poco hasta la máxima. Lineal: en proporción al stick."},
+{"The game flies like a plane: stick up dives, stick down climbs. On: stick up climbs and down dives. Only while flying: menus keep up = up. (Gyro aiming has its own Invert setting.)", "El juego vuela como un avión: stick arriba baja, stick abajo sube. Sí: stick arriba sube y abajo baja. Solo en vuelo: en los menús arriba sigue siendo arriba. (El giroscopio tiene su propio ajuste de invertir.)"},
+{"The buttons the game shows in its prompts (the button each GameCube button is bound to): Automatic shows PlayStation symbols with a PlayStation controller, Switch buttons with a Switch controller and Xbox buttons otherwise; or the original GameCube ones.", "Los botones que muestra el juego en sus avisos (el botón asignado a cada botón de GameCube): Automático muestra los símbolos de PlayStation con un mando de PlayStation, los botones de Switch con un mando de Switch y los de Xbox en los demás casos; o los originales de GameCube."},
+{"The game blends a dither pattern over the picture, made for the GameCube's 640x480. At higher resolutions it shows as a grid (Hoth's sky). Off, like Dolphin's \"Disable Dithering\" code.", "El juego mezcla un patrón de tramado sobre la imagen, hecho para los 640x480 de GameCube. A más resolución se ve como una rejilla (el cielo de Hoth). No: como el código \"Disable Dithering\" de Dolphin."},
 {"Audio buffer", "Búfer de audio"},
 {"LARGE", "GRANDE"},
 {"HUGE", "ENORME"},

@@ -2,7 +2,8 @@
 //
 // The check: GitHub's API for the repository's latest release (drafts and pre-releases are never
 // "latest"), its tag (v1.3) against this build's version, and its assets: the Windows zip
-// (*-windows-x64.zip) or the AppImage (*-x86_64.AppImage), and SHA256SUMS.txt.
+// (*-windows-x64.zip) or the AppImage of this build's architecture (*-x86_64.AppImage,
+// *-aarch64.AppImage), and SHA256SUMS.txt. macOS and Android only open the release page.
 //
 // The install, on a worker thread:
 // - Windows: the zip goes to <program folder>\update\, is checked, and every file in it except
@@ -435,6 +436,8 @@ void checkWorker() {
     u64 assetSize = 0;
 #ifdef _WIN32
     const char* suffix = "-windows-x64.zip";
+#elif defined(__aarch64__)
+    const char* suffix = "-aarch64.AppImage";  // (an ARM AppImage must never take the x86_64 one)
 #else
     const char* suffix = "-x86_64.AppImage";
 #endif

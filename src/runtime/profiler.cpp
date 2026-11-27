@@ -235,6 +235,7 @@ void stallReport(const std::vector<StallSample>& samples, double ms, bool ongoin
          ongoing ? "still waiting:" : "frames again after", ms, levelName().c_str(), samples.size());
     for (size_t i = 0; i < v.size() && i < 4; i++)
         logf("stall", "  %3.0f%%  %s", 100.0 * v[i].second / double(samples.size()), v[i].first.c_str());
+    if (ongoing) logf("stall", "  gpu: %s", gpuStateText().c_str());
 }
 
 #else
@@ -283,6 +284,7 @@ void stallWatchdog() {
             if (now - reported >= (reported == last ? kFirst : kInterim) && s_lastPresent.load(std::memory_order_relaxed) == last) {
                 logf("stall", "still waiting: %.0f ms without a new frame (level %s)", double(now - last) * 1000.0 / double(kTbClock),
                      levelName().c_str());
+                logf("stall", "  gpu: %s", gpuStateText().c_str());
                 reported = now;
             }
         }

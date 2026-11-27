@@ -68,6 +68,7 @@ bool Config::load(const std::string& dir) {
             else if (l[0] == "entry") extraEntries.insert(a);
             else if (l[0] == "noentry") notEntries.insert(a);
             else if (l[0] == "idle") idleLoops.insert(a);
+            else if (l[0] == "nopoll") noPollLoops.insert(a);
             else {
                 fprintf(stderr, "hooks.txt: unknown kind %s\n", l[0].c_str());
                 return false;

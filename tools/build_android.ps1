@@ -20,7 +20,8 @@ param(
     [string]$BuildDir = "",
     [string]$Config = "RelWithDebInfo",
     [string]$Env = "",   # "R2_WATCHDOG=5;R2_IRQ_LOG=1": environment for the app (SDL's SDL_ENV.* meta-data; debugging)
-    [switch]$Configure
+    [switch]$Configure,
+    [switch]$Debuggable  # test builds: the launch intent's R2_* extras become environment variables
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -120,12 +121,21 @@ Run $python @("$root\tools\third_party_notices.py", $build, "$stage\assets\THIRD
 
 # manifest (-Env: environment variables SDL sets before the program starts), resources, assets
 $manifest = "$root\android\AndroidManifest.xml"
-if ($Env) {
-    $meta = ($Env -split ';' | Where-Object { $_ -match '^([^=]+)=(.*)$' } | ForEach-Object {
-        "        <meta-data android:name=`"SDL_ENV.$($Matches[1])`" android:value=`"$($Matches[2])`" />" }) -join "`n"
-    (Get-Content -Raw $manifest).Replace("    </application>", "$meta`n    </application>") | Set-Content -Encoding utf8 "$stage\AndroidManifest.xml"
+if ($Env -or $Debuggable) {
+    $text = Get-Content -Raw $manifest
+    if ($Env) {
+        $meta = ($Env -split ';' | Where-Object { $_ -match '^([^=]+)=(.*)$' } | ForEach-Object {
+            "        <meta-data android:name=`"SDL_ENV.$($Matches[1])`" android:value=`"$($Matches[2])`" />" }) -join "`n"
+        $text = $text.Replace("    </application>", "$meta`n    </application>")
+        Write-Host "app environment: $Env"
+    }
+    if ($Debuggable) {
+        $text = $text -replace '<application(\r?\n)', "<application`$1        android:debuggable=`"true`"`$1"
+        if ($text -notmatch 'android:debuggable') { throw "could not mark the manifest debuggable" }
+        Write-Host "debuggable test build"
+    }
+    $text | Set-Content -Encoding utf8 "$stage\AndroidManifest.xml"
     $manifest = "$stage\AndroidManifest.xml"
-    Write-Host "app environment: $Env"
 }
 Run "$bt\aapt2.exe" @("compile", "--dir", "$root\android\res", "-o", "$stage\res.zip")
 Run "$bt\aapt2.exe" @("link", "-o", "$stage\base.apk", "-I", $androidJar, "--manifest", $manifest,

@@ -81,9 +81,10 @@ ImVec4 vec(ImU32 c, float a = -1.f) {
     return v;
 }
 
-ImFont* s_font = nullptr;     // body text
-ImFont* s_fontBig = nullptr;  // titles
-constexpr float kFontPx = 34.f, kBigPx = 72.f;
+ImFont* s_font = nullptr;      // body text
+ImFont* s_fontBig = nullptr;   // titles
+ImFont* s_fontGame = nullptr;  // overlays over the game: a condensed bold italic like its menus' (else s_font)
+constexpr float kFontPx = 34.f, kBigPx = 72.f, kGameFontPx = 48.f;
 
 void applyStyle() {
     ImGuiStyle& st = ImGui::GetStyle();
@@ -248,9 +249,11 @@ bool padTest() {
     return on;
 }
 
-// (no achievements page in this build: RetroAchievements is off unless set in settings.ini)
-enum Section { Display, Gameplay, Audio, Controls, Cheats, Mods, Vr, SectionCount };
-const char* const kSectionNames[SectionCount] = {"DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "MODS", "VR"};
+// (Red Two VR: no achievements page, RetroAchievements is off unless set in settings.ini; a VR page)
+// GAME (start / reset, the disc, updates, Discord, quit) has its own tab since 2026-11-25 (issue #53;
+// it was the top of DISPLAY): R2_MENU_SECTION numbers moved up by one from DISPLAY on.
+enum Section { Game, Display, Gameplay, Audio, Controls, Cheats, Mods, Vr, SectionCount };
+const char* const kSectionNames[SectionCount] = {"GAME", "DISPLAY", "GAMEPLAY", "AUDIO", "CONTROLS", "CHEATS", "MODS", "VR"};
 int s_section = 0;
 int s_rowSel[SectionCount] = {};    // each page's selected row
 int s_rowCount[SectionCount] = {};  // the rows each page had when it was last drawn
@@ -274,14 +277,21 @@ bool s_usingPad = false; // the last input came from a controller (button hints)
 // pressed since the menu opened, else port 1's
 SDL_GamepadType s_padType = SDL_GAMEPAD_TYPE_UNKNOWN;
 bool s_padPsPressed = false;
-const char* padName(const char* xbox, const char* ps) { return input::isPlayStation(s_padType) ? ps : xbox; }
+// a button's name on that controller: Xbox, PlayStation, or Switch (its labels by position: the
+// bottom face button is B, the right one A, L / R for the bumpers)
+const char* padName(const char* xbox, const char* ps, const char* sw = nullptr) {
+    if (input::isPlayStation(s_padType)) return ps;
+    if (sw && input::isNintendoSwitch(s_padType)) return sw;
+    return xbox;
+}
 const char* padBackName(bool upper = true) {  // the Back button's name on the controller
     return s_padType == SDL_GAMEPAD_TYPE_PS5 ? (upper ? "CREATE" : "Create")
          : s_padType == SDL_GAMEPAD_TYPE_PS4 ? (upper ? "SHARE" : "Share")
          : s_padType == SDL_GAMEPAD_TYPE_PS3 ? (upper ? "SELECT" : "Select")
-                                             : (upper ? "BACK" : "Back");
+         : input::isNintendoSwitch(s_padType) ? (upper ? "MINUS" : "Minus")
+                                              : (upper ? "BACK" : "Back");
 }
-const char* padStartName() { return padName("START", s_padType == SDL_GAMEPAD_TYPE_PS3 ? "START" : "OPTIONS"); }
+const char* padStartName() { return padName("START", s_padType == SDL_GAMEPAD_TYPE_PS3 ? "START" : "OPTIONS", "PLUS"); }
 // this frame's press is a new one, not the repeat of a held direction: ON / OFF switches take
 // only these (a held d-pad / stick / arrow key repeats every 0.09 s, and on a switch row it
 // flipped the setting back and forth - the user's log: fast_disc 22 times in 1.4 s)
@@ -1116,7 +1126,7 @@ void languageRow(settings::Settings& s) {
     }
 }
 
-void pageDisplay(settings::Settings& s) {
+void pageGame(settings::Settings& s) {
     if (discBrowserShown()) {
         pageBrowse(s);
         return;
@@ -1182,6 +1192,9 @@ void pageDisplay(settings::Settings& s) {
         logf("menu", "quit to desktop");
         quitToDesktop();
     }
+}
+
+void pageDisplay(settings::Settings& s) {
     heading("SCREEN");
     if (toggleRow("Fullscreen", s.fullscreen, "Also F11 or Alt+Enter.")) s_changed = s_display = true;
     if (enumRow("Internal resolution", s.resolution, settings::resolutionName,
@@ -1218,6 +1231,10 @@ void pageDisplay(settings::Settings& s) {
     if (enumRow("Aspect ratio", s.aspect, settings::aspectName,
                 "Widescreen widens the 3D view and fills the screen in cutscenes. At most 21:9: a wider window "
                 "gets bars at the sides."))
+        s_changed = s_display = true;
+    if (toggleRow("Cinematic bars", s.cinemaBars,
+                  "Widescreen: cutscenes, the opening crawl and the credits keep their 2.1:1 cinema frame with black bars "
+                  "instead of filling the screen."))
         s_changed = s_display = true;
     if (toggleRow("HUD at screen edges", s.hudEdges, "Widescreen: the flight HUD sits at the edges of the screen."))
         s_changed = true;
@@ -1262,7 +1279,7 @@ void pageGameplay(settings::Settings& s) {
     heading("CINEMATICS");
     if (toggleRow("Skip intro logos", s.skipLogos, "Reach the title screen in seconds.")) s_changed = true;
     if (toggleRow("Skippable cutscenes", s.skipCutscenes,
-                  "Press B during the opening crawl or a cutscene to skip to the gameplay."))
+                  "Hold B for 2 seconds during the opening crawl or a cutscene to skip it."))
         s_changed = true;
 }
 
@@ -1444,6 +1461,27 @@ void pageAchievements(settings::Settings& s) {
                 s_raPassword.clear();
             }
         }
+#ifndef __ANDROID__
+        {
+            // ra_web_login.cpp: the same login, typed on a page in the browser (a real keyboard,
+            // the browser's password manager)
+            const bool web = ra::webLoginRunning();
+            if (buttonRow("Log in in your browser", web ? "OPEN THE PAGE AGAIN" : "OPEN BROWSER",
+                          web ? "Waiting for you to sign in on the page Red Two opened in your browser (it stays open "
+                                "for 10 minutes). This button opens it again."
+                              : "Opens a sign-in page in your web browser: type your retroachievements.org name and "
+                                "password there instead of here. The page comes from Red Two on this computer; Red Two "
+                                "keeps only the login token. (On a Steam Deck in Game Mode, log in above instead.)")) {
+                std::string url, err;
+                if (ra::webLoginStart(url, err)) {
+                    openUrl(url);
+                    s_raNote = "Sign in on the page in your browser.";
+                } else {
+                    s_raNote = err;
+                }
+            }
+        }
+#endif
         if (s_raDolphin < 0) s_raDolphin = ra::dolphinLoginAvailable() ? 1 : 0;
         if (s_raDolphin == 1 && buttonRow("Dolphin's login", "IMPORT",
                                           "Dolphin is logged in to RetroAchievements on this computer: use the same "
@@ -1452,6 +1490,7 @@ void pageAchievements(settings::Settings& s) {
             s_changed = false;  // (saved by the import)
         }
     } else {
+        s_raNote.clear();  // (logged in: the Account row says it)
         char b[160];
         snprintf(b, sizeof b, "%s  (%u points)", st.user.c_str(), st.score);
         infoRow("Account", b, "The retroachievements.org account unlocks go to (softcore points).");
@@ -1591,10 +1630,10 @@ struct BrowseEntry {
     bool file = false, ok = false;
     std::string help;
 };
-// what the browser picks: a texture pack folder (MODS) or the game disc image (DISPLAY's disc page)
+// what the browser picks: a texture pack folder (MODS) or the game disc image (GAME's disc page)
 enum class BrowseMode { Textures, Disc };
 BrowseMode s_browseMode = BrowseMode::Textures;
-int s_browseSection = 0;                 // the page it is shown on (Mods / Display)
+int s_browseSection = 0;                 // the page it is shown on (Mods / Game)
 bool s_browsing = false;
 std::string s_browseDir;                 // the folder shown
 std::string s_browseParent;              // its parent ("" at a root)
@@ -1789,7 +1828,7 @@ void browseChoose(settings::Settings& s) {
     logf("menu", "texture folder chosen: %s (%zu textures)", s.texturesFolder.c_str(), n);
 }
 
-// --- the game disc (DISPLAY: the launcher's first page) ------------------------------------
+// --- the game disc (GAME: the launcher's first page) ---------------------------------------
 // The disc image the game boots from: --disc, else the one chosen here before (setting
 // disc_path), else one found next to the program or in the user folder (main.cpp). With none (or
 // one that is not Rogue Leader, USA, revision 0) the launcher opens on the disc page and the game
@@ -1802,7 +1841,7 @@ std::string s_discProblem;  // why s_discPath cannot be used ("" if it can)
 std::string s_discNote;     // why the launcher asks (main.cpp: a chosen disc that went away, ...)
 std::string s_discError;    // the last choice that was refused, and why
 std::string s_discEdit;     // the path row's text
-bool s_discPage = false;    // the disc page instead of DISPLAY's rows
+bool s_discPage = false;    // the disc page instead of GAME's rows
 bool s_discChanged = false; // chosen in game: for the next start
 int s_discReturnRow = 0;
 
@@ -1810,19 +1849,19 @@ bool discReady() { return !s_discPath.empty() && s_discProblem.empty(); }
 
 void discPageOpen() {
     if (s_discPage) return;
-    s_discReturnRow = s_rowSel[Display];
+    s_discReturnRow = s_rowSel[Game];
     s_discPage = true;
     s_discError.clear();
     s_discEdit = s_discPath;
-    s_rowSel[Display] = 0;
+    s_rowSel[Game] = 0;
     s_scrollToSel = true;
-    s_section = Display;
+    s_section = Game;
 }
 
 void discPageClose() {
     s_discPage = false;
-    s_browseLeft = true;  // (DISPLAY's own rows again next frame)
-    s_rowSel[Display] = s_discReturnRow;
+    s_browseLeft = true;  // (GAME's own rows again next frame)
+    s_rowSel[Game] = s_discReturnRow;
     s_scrollToSel = true;
 }
 
@@ -1849,7 +1888,7 @@ bool discChoose(const std::string& path) {
     settings::save();
     if (changed && !s_launcher) s_discChanged = true;
     logf("menu", "disc chosen: %s (%s)", p.c_str(), what.c_str());
-    if (s_launcher) s_rowSel[Display] = 0;  // (Start game, at the top of the disc page)
+    if (s_launcher) s_rowSel[Game] = 0;  // (Start game, at the top of the disc page)
     return true;
 }
 
@@ -1959,7 +1998,7 @@ void pageDisc(settings::Settings& s) {
         discDialogOpen();
     if (buttonRow("Find it", "OPEN", "Look through your folders here, with the controller or the keyboard: Rogue Leader "
                                      "images are marked."))
-        browseBegin(BrowseMode::Disc, Display, s_discPath.empty() ? std::string() : u8str(u8path(s_discPath).parent_path()));
+        browseBegin(BrowseMode::Disc, Game, s_discPath.empty() ? std::string() : u8str(u8path(s_discPath).parent_path()));
     if ((!s_launcher || ready) &&
         buttonRow(s_launcher ? "Other settings" : "Back", "DONE", "Back to the rest of this page (B / Esc too)."))
         discPageClose();
@@ -2300,18 +2339,18 @@ void pageControls() {
                        25, 200, 5))
             s_changed = true;
         if (enumRow("Response", st.stickCurve, stickCurveLabel,
-                    "How fast the craft turns for how far the stick goes. Smooth: gentle near the center, building "
-                    "up evenly to full speed. Linear: in proportion to the stick. GameCube: the game's own curve, "
-                    "half speed up to 80% of the stick, then a jump to full."))
-            s_changed = true;
-        if (toggleRow("Invert Y axis", st.stickInvertY,
-                      "Off: pushing the control stick forward dives, as on the GameCube. On: forward climbs and "
-                      "back dives, like a plane's control column. Flight only: the menus keep the stick as it is."))
+                    "How fast the craft turns for how far the stick goes. GameCube (default): the game's own curve, "
+                    "half speed up to 80% of the stick, then a jump to full. Smooth: gentle near the center, "
+                    "building up evenly to full speed. Linear: in proportion to the stick."))
             s_changed = true;
         if (percentRow("Deadzone", st.stickDeadzone,
                        "How far the control stick moves before anything happens (round, and the output grows from "
                        "zero at its edge). Raise it if the craft drifts with the stick let go.",
                        0, 50, 1))
+            s_changed = true;
+        if (toggleRow("Invert Y axis", st.invertY,
+                      "The game flies like a plane: stick up dives, stick down climbs. On: stick up climbs and down "
+                      "dives. Only while flying: menus keep up = up. (Gyro aiming has its own Invert setting.)"))
             s_changed = true;
         stickMeter(true);
     }
@@ -2331,10 +2370,11 @@ void pageControls() {
         stickMeter(false);
     }
     heading("TRIGGERS");
-    if (toggleRow("Trigger clicks on LB / RB", settings::get().bumperClicks,
+    if (toggleRow("Move trigger clicks to LB / RB", settings::get().bumperClicks,
                   "A GameCube trigger clicks at the end of its pull: full boost (wings closed, no firing) or full brake. "
-                  "On: the triggers only throttle and brake, LB / RB click (as players set up in Dolphin), and Z moves "
-                  "from RB to the right stick click. Changes the controller's bindings below."))
+                  "Off: LT / RT click at the end of their pull, as on a GameCube, and LB / RB roll (Z, held with the "
+                  "stick). On: LT / RT only throttle and brake, LB / RB give the clicks (as players set up in "
+                  "Dolphin), and roll moves to the right stick click. Changes the controller's bindings below."))
         s_changed = true;
     triggerMeter();
     heading("ON-SCREEN BUTTONS");
@@ -2342,8 +2382,9 @@ void pageControls() {
         settings::Settings& st = settings::get();
         const bool sel = rowBegin("Button prompts", "The buttons the game shows in its prompts (the button each GameCube "
                                                     "button is bound to): Automatic shows PlayStation symbols with a "
-                                                    "PlayStation controller and Xbox buttons otherwise; or the original GameCube ones.");
-        static const char* const kNames[] = {"AUTOMATIC", "XBOX", "PLAYSTATION", "GAMECUBE"};
+                                                    "PlayStation controller, Switch buttons with a Switch controller and Xbox "
+                                                    "buttons otherwise; or the original GameCube ones.");
+        static const char* const kNames[] = {"AUTOMATIC", "XBOX", "PLAYSTATION", "SWITCH", "GAMECUBE"};
         constexpr int n = int(settings::ButtonPrompts::Count);
         static_assert(std::size(kNames) == n);
         const int cur = int(st.buttonPrompts);
@@ -2455,16 +2496,16 @@ void pageControls() {
     }
     heading("HOTKEYS");
     static const char* const kHotkeyNames[settings::HkCount] = {"Save state", "Load state", "Next slot", "Previous slot",
-                                                                "Texture packs on / off"};
+                                                                "Texture packs on / off", "Pause audio commentary"};
     for (int a = 0; a < settings::HkCount; a++) {
         ImGui::PushID(100 + a);
         const bool capturing = hotkeys::captureAction() == a || s_pendingHotkey == a;
         const std::string text = capturing ? std::string("HOLD, THEN LET GO...")
                                            : hotkeys::label(a, s_padDevice);
         const bool idle = !rebindingNow();
-        const std::string padHelp = std::string("Press ") + padName("A", "Cross") +
-                                    " (or click), then hold the buttons together - " + padBackName(false) + " + " + padName("RB", "R1") +
-                                    " - and let go. " + padName("X", "Square") + " or a right-click clears it.";
+        const std::string padHelp = std::string("Press ") + padName("A", "Cross", "B") +
+                                    " (or click), then hold the buttons together - " + padBackName(false) + " + " + padName("RB", "R1", "R") +
+                                    " - and let go. " + padName("X", "Square", "Y") + " or a right-click clears it.";
         const bool pressed = buttonRow(kHotkeyNames[a], text.c_str(),
                                        s_padDevice ? padHelp.c_str()
                                                    : "Press Enter (or click), then hold the keys together and let go. Delete "
@@ -2482,8 +2523,8 @@ void pageControls() {
         const bool capturing = s_captureRow == i || s_pendingCapture == i;
         const std::string text = capturing ? std::string("PRESS A KEY OR BUTTON...") : bindingText(row);
         const bool idle = s_captureRow < 0 && s_pendingCapture < 0 && s_pendingHotkey < 0 && !hotkeys::capturing();
-        const std::string help = std::string("Press ") + padName("A", "Cross") +
-                                 " / Enter (or click), then the new key or button. " + padName("X", "Square") +
+        const std::string help = std::string("Press ") + padName("A", "Cross", "B") +
+                                 " / Enter (or click), then the new key or button. " + padName("X", "Square", "Y") +
                                  " / Delete or a right-click clears it. " + padBackName(false) + " / Esc cancels.";
         const bool pressed = buttonRow(row.name, text.c_str(), help.c_str(), capturing ? kGold : kText);
         const bool sel = s_rowSel[s_section] == s_row - 1;
@@ -2649,9 +2690,9 @@ void tabBar() {
                  on ? kGold : (hot ? kText : kDim), name, tr, on ? alpha(kAmber, 40) : 0);
     }
     const float cy = p.y + h * 0.5f;
-    keyCap(dl, ImVec2(p.x + capW * 0.5f, cy), s_usingPad ? padName("LB", "L1") : "Q",
+    keyCap(dl, ImVec2(p.x + capW * 0.5f, cy), s_usingPad ? padName("LB", "L1", "L") : "Q",
            s_navKey[NavPrevTab].held || ImGui::IsKeyDown(ImGuiKey_Q));
-    keyCap(dl, ImVec2(p.x + avail - capW * 0.5f, cy), s_usingPad ? padName("RB", "R1") : "E",
+    keyCap(dl, ImVec2(p.x + avail - capW * 0.5f, cy), s_usingPad ? padName("RB", "R1", "R") : "E",
            s_navKey[NavNextTab].held || ImGui::IsKeyDown(ImGuiKey_E));
     const float ruleY = p.y + h + 12.f * s_ui;
     dl->AddLine(ImVec2(p.x, ruleY), ImVec2(p.x + avail, ruleY), alpha(kGold, 60), 1.f);
@@ -2740,8 +2781,8 @@ bool drawMenu(settings::Settings& s, float t) {
     const float helpY = footY - 40.f * s_ui;
     bg->AddLine(ImVec2(a.x + pad, helpY - 12.f * s_ui), ImVec2(b.x - pad, helpY - 12.f * s_ui), alpha(kGold, 50), 1.f);
     // (a PlayStation controller's buttons by their names: cross, circle, square, L1 / R1, ...)
-    const std::string accept = padName("A", "CROSS"), back = padName("B", "CIRCLE"), clear = padName("X", "SQUARE");
-    std::string hint = s_usingPad ? std::string(padName("LB / RB", "L1 / R1")) + loc("  TABS      D-PAD / STICK  MOVE, CHANGE      ") + accept + loc("  SELECT")
+    const std::string accept = padName("A", "CROSS", "B"), back = padName("B", "CIRCLE", "A"), clear = padName("X", "SQUARE", "Y");
+    std::string hint = s_usingPad ? std::string(padName("LB / RB", "L1 / R1", "L / R")) + loc("  TABS      D-PAD / STICK  MOVE, CHANGE      ") + accept + loc("  SELECT")
                                   : loc("Q / E  TABS      ARROWS  MOVE, CHANGE      ENTER  SELECT");
     if (s_section == Controls) hint += s_usingPad ? "      " + clear + loc("  CLEAR") : loc("      DEL  CLEAR");
     if (s_launcher) hint += s_usingPad ? std::string("      ") + padStartName() + loc("  LAUNCH") : "";
@@ -2774,6 +2815,7 @@ bool drawMenu(settings::Settings& s, float t) {
         s_changed = s_display = false;
         s_row = 0;
         switch (s_section) {
+        case Game: pageGame(s); break;
         case Display: pageDisplay(s); break;
         case Gameplay: pageGameplay(s); break;
         case Audio: pageAudio(s); break;
@@ -2825,7 +2867,7 @@ bool drawMenu(settings::Settings& s, float t) {
     return true;
 }
 
-// R2_MENU_BIND_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=3, automated runs only: their bindings
+// R2_MENU_BIND_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=4, automated runs only: their bindings
 // live in build/test_cache): rebinds A and STICK UP on the keyboard through synthetic key
 // presses, logs the results, then resets the keyboard profile.
 void pushKey(SDL_Scancode sc) {
@@ -2840,7 +2882,7 @@ void pushKey(SDL_Scancode sc) {
         SDL_PushEvent(&e);
     }
 }
-// R2_MENU_TEXT_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=5 R2_MENU_ROW=1 and R2_INPUT set): types
+// R2_MENU_TEXT_TEST=1 (with R2_MENU=1 R2_MENU_SECTION=6 R2_MENU_ROW=1 and R2_INPUT set): types
 // into the achievements page's user name row through synthetic key and text events
 void pushText(const char* text) {
     SDL_Event e{};
@@ -2925,6 +2967,7 @@ void padSelfTest() {
         if (k == at) SDL_SetJoystickVirtualAxis(joy, a, v);
         if (k == at + 4) SDL_SetJoystickVirtualAxis(joy, a, 0);
     };
+    if (k == 0) switchSection(Display);  // (the steps below start on DISPLAY; GAME comes before it since 1.3.1h)
     k++;
     press(40, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);   // Display -> Gameplay
     press(60, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);   // -> Audio
@@ -2988,8 +3031,8 @@ bool launcherShowing() { return s_launcher; }
 void launcherOpen() {
     s_launcher = true;
     s_launch = false;
-    s_section = Display;
-    s_rowSel[Display] = 0;  // Start game: Enter / A right away
+    s_section = Game;
+    s_rowSel[Game] = 0;  // Start game: Enter / A right away
     s_usingPad = SDL_HasGamepad();  // (button hints; the first input decides after that)
     s_padDevice = s_usingPad && aurora::pad::port_controller(0) != 0;  // (the Controls page's device)
     setOpen(true);
@@ -3025,7 +3068,7 @@ bool launcherFrame() {
     if (browseEnv && !browseDone) {
         browseDone = true;
         discPageOpen();
-        browseBegin(BrowseMode::Disc, Display, browseEnv);
+        browseBegin(BrowseMode::Disc, Game, browseEnv);
     }
     if (autoEnv && double(tbNow() - openedTb) / double(kTbClock) >= atof(autoEnv)) {
         logf("menu", "launcher: R2_LAUNCHER_AUTO start");
@@ -3101,11 +3144,33 @@ void menuImGuiInit(const void*) {
         if (s_font && s_fontBig) break;
     }
     if (!s_font) s_font = s_fontBig = io.Fonts->AddFontDefault();
+    for (const char* path : {
+#ifdef _WIN32
+             "C:\\Windows\\Fonts\\ARIALNBI.TTF", "C:\\Windows\\Fonts\\ARIALNB.TTF",
+#elif defined(__APPLE__)
+             "/System/Library/Fonts/Supplemental/Arial Narrow Bold Italic.ttf",
+             "/System/Library/Fonts/Supplemental/Arial Narrow Bold.ttf",
+#else
+             "/usr/share/fonts/TTF/DejaVuSansCondensed-BoldOblique.ttf",
+             "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-BoldOblique.ttf",
+#endif
+         }) {
+        FILE* f = fopen(path, "rb");
+        if (!f) continue;
+        fclose(f);
+        ImFontConfig cfg;
+        cfg.OversampleH = 2;
+        if ((s_fontGame = io.Fonts->AddFontFromFileTTF(path, kGameFontPx, &cfg))) break;
+    }
+    if (!s_fontGame) s_fontGame = s_font;
     applyStyle();
 }
 
+static void rawMouseEvent(const SDL_Event& e);  // (below: the mouse in the game's menus)
 void menuEvent(const void* p) {
     const SDL_Event& e = *static_cast<const SDL_Event*>(p);
+    if (e.type == SDL_EVENT_MOUSE_MOTION || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL)
+        rawMouseEvent(e);  // (the mouse in the game's menus)
     // the window moved to another display, or the display's mode changed: with V-Sync the
     // retrace follows its refresh
     if ((e.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED || e.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED) &&
@@ -3159,16 +3224,162 @@ void toast(const std::string& text) {
     s_toastTb = tbNow();
 }
 
+// The mouse in the game's own menus (hle_game.cpp mouseMenuUpdate): the pointer in their 640x480
+// layout - the frame (displayAspect fitted into the window), its 4:3 middle at full height, and
+// the menus' 450-line frame buffer, stretched to the full height in widescreen (letterbox fill),
+// else 15 lines of border above and below; layout row = frame buffer line + 16 (the frame's top
+// half is copied from EFB row 16). Clicks and the wheel add up until the game's next frame. The
+// pointer comes from SDL's events (menuEvent): Aurora routes the mouse past ImGui while its menu
+// is closed, so ImGui's own mouse state does not follow it then.
+namespace {
+bool s_anyGamepad = false;  // a controller is connected (menuDraw, twice a second)
+std::mutex s_gameMouseMu;
+GameMouse s_gameMouse;
+struct RawMouse {
+    bool known = false, moved = false, left = false, right = false;
+    float x = 0.f, y = 0.f;  // window coordinates (ImGui's display coordinates)
+    int wheel = 0;
+} s_rawMouse;
+}  // namespace
+static void rawMouseEvent(const SDL_Event& e) {
+    static const bool log = envFlag("R2_MOUSE_LOG");  // R2_MOUSE_LOG=1: the mouse in the game's menus
+    if (log && e.type != SDL_EVENT_MOUSE_MOTION) logf("mouse", "event %X", e.type);
+    // a touch screen's taps arrive as mouse events too (SDL's touch mouse): on a phone they press
+    // the on-screen buttons (touch.cpp), and pointing at a menu item under them would select it
+    const SDL_MouseID which = e.type == SDL_EVENT_MOUSE_MOTION ? e.motion.which
+                              : e.type == SDL_EVENT_MOUSE_WHEEL ? e.wheel.which
+                                                                : e.button.which;
+    if (which == SDL_TOUCH_MOUSEID || which == SDL_PEN_MOUSEID) return;
+    std::lock_guard lk(s_gameMouseMu);
+    switch (e.type) {
+    case SDL_EVENT_MOUSE_MOTION:
+        s_rawMouse.known = s_rawMouse.moved = true;
+        s_rawMouse.x = e.motion.x, s_rawMouse.y = e.motion.y;
+        break;
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        s_rawMouse.known = true;
+        s_rawMouse.x = e.button.x, s_rawMouse.y = e.button.y;
+        if (e.button.button == SDL_BUTTON_LEFT) s_rawMouse.left = true;
+        else if (e.button.button == SDL_BUTTON_RIGHT) s_rawMouse.right = true;
+        break;
+    case SDL_EVENT_MOUSE_WHEEL:
+        if (e.wheel.y != 0.f) s_rawMouse.wheel = e.wheel.y > 0.f ? 1 : -1;
+        break;
+    default: break;
+    }
+}
+static float displayAspect();
+GameMouse takeGameMouse() {
+    std::lock_guard lk(s_gameMouseMu);
+    GameMouse m = s_gameMouse;
+    s_gameMouse.moved = s_gameMouse.left = s_gameMouse.right = false;
+    s_gameMouse.wheel = 0;
+    return m;
+}
+static bool windowToGame(ImVec2 p, float& gx, float& gy) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    if (W <= 0.f || H <= 0.f) return false;
+    const float a = displayAspect() > 0.f ? displayAspect() : W / H;
+    float fw = W, fh = H;
+    if (W / H > a) fw = H * a;
+    else fh = W / a;
+    const float fx = (W - fw) * 0.5f, fy = (H - fh) * 0.5f;
+    const float bw = fh * 4.f / 3.f, bx = fx + (fw - bw) * 0.5f;
+    const float lines = float(std::clamp(viXfbLines(), 200u, 528u));
+    gx = (p.x - bx) * 640.f / bw;
+    gy = settings::get().aspect != settings::Aspect::R4_3 ? (p.y - fy) / fh * lines + 16.f
+                                                          : (p.y - fy) / fh * 480.f - (480.f - lines) * 0.5f + 16.f;
+    return p.x >= fx && p.x < fx + fw && p.y >= fy && p.y < fy + fh;
+}
+// R2_MOUSE_TEST="<s>:<x>,<y>[:l|r|u|d];..." (tests): at those seconds the pointer moves to that
+// place (fractions of the window) through SDL events, then a left / right click or the wheel
+static void mouseTest() {
+    static const char* spec = getenv("R2_MOUSE_TEST");
+    if (!spec || !*spec) return;
+    static const u64 t0 = tbNow();
+    static int releaseFrames = -1;
+    static Uint8 releaseButton = 0;
+    SDL_Window* win = aurora_get_window();
+    if (!win) return;
+    const SDL_WindowID id = SDL_GetWindowID(win);
+    if (releaseFrames >= 0 && releaseFrames-- == 0) {
+        SDL_Event e{};
+        e.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        e.button.windowID = id, e.button.button = releaseButton, e.button.down = false;
+        {
+            std::lock_guard lk(s_gameMouseMu);
+            e.button.x = s_rawMouse.x, e.button.y = s_rawMouse.y;
+        }
+        SDL_PushEvent(&e);
+    }
+    if (double(tbNow() - t0) / double(kTbClock) < atof(spec)) return;
+    double fx = 0, fy = 0;
+    char act = 0;
+    const char* c = strchr(spec, ':');
+    if (c) {
+        fx = atof(c + 1);
+        if (const char* comma = strchr(c, ',')) fy = atof(comma + 1);
+        const char* c2 = strchr(c + 1, ':');
+        const char* semi = strchr(spec, ';');
+        if (c2 && (!semi || c2 < semi)) act = c2[1];
+    }
+    int w = 0, h = 0;
+    SDL_GetWindowSize(win, &w, &h);
+    SDL_Event e{};
+    e.type = SDL_EVENT_MOUSE_MOTION;
+    e.motion.windowID = id;
+    e.motion.x = float(fx * w), e.motion.y = float(fy * h);
+    SDL_PushEvent(&e);
+    if (act == 'l' || act == 'r') {
+        SDL_Event b{};
+        b.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        b.button.windowID = id, b.button.button = act == 'l' ? SDL_BUTTON_LEFT : SDL_BUTTON_RIGHT, b.button.down = true;
+        b.button.clicks = 1;
+        b.button.x = float(fx * w), b.button.y = float(fy * h);
+        SDL_PushEvent(&b);
+        releaseFrames = 3, releaseButton = b.button.button;
+    } else if (act == 'u' || act == 'd') {
+        SDL_Event wh{};
+        wh.type = SDL_EVENT_MOUSE_WHEEL;
+        wh.wheel.windowID = id, wh.wheel.y = act == 'u' ? 1.f : -1.f;
+        SDL_PushEvent(&wh);
+    }
+    logf("test", "mouse test: %.2f, %.2f of the window%s%c", fx, fy, act ? " " : "", act ? act : ' ');
+    const char* semi = strchr(spec, ';');
+    spec = semi ? semi + 1 : nullptr;
+}
+
 // The aspect Aurora renders at: the setting's, or the window's (-1) up to settings::kMaxAspect -
 // a wider window gets a fixed 21:9 frame with bars at the sides.
 static float s_appliedAspect = 0.f;
 
-static float displayAspect() {
+static float settingAspect() {
     const float a = settings::aspectValue(settings::get().aspect);
     if (a > 0.f) return std::min(a, settings::kMaxAspect);
     int w = 0, h = 0;
     if (SDL_Window* win = aurora_get_window()) SDL_GetWindowSizeInPixels(win, &w, &h);
     return w > 0 && h > 0 && float(w) / float(h) > settings::kMaxAspect ? settings::kMaxAspect : -1.f;
+}
+
+// Frames shown at their own aspect in widescreen (ZeDctr's Red Two Plus fork): with the setting
+// cinemaBars a letterboxed cinematic (the VI's 304 lines; not the front end's own letterboxed
+// screens, mode 6) renders at 2.105:1 (4:3 * 480 / 304) and shows with black bars, the game's
+// cameras opening nothing (Aurora: the letterbox camera's own aspect, r = 1); and a full-screen
+// documentary / teaser movie (hle_game.cpp) at 4:3 instead of stretched. The game's camera
+// aspect constants keep the setting's aspect meanwhile (menuDraw).
+static float ownFrameAspect() {
+    const settings::Settings& s = settings::get();
+    if (s.aspect == settings::Aspect::R4_3) return 0.f;
+    if (movieFullscreenActive()) return 4.f / 3.f;
+    const u32 lines = viXfbLines();
+    if (s.cinemaBars && lines > 0 && lines < 400 && peekGuest32(0x7FDE8254) != 6) return 4.f / 3.f * 480.f / float(lines);
+    return 0.f;
+}
+
+static float displayAspect() {
+    const float own = ownFrameAspect();
+    return own > 0.f ? own : settingAspect();
 }
 
 static void applyDisplayAspect() {
@@ -3261,7 +3472,7 @@ void menuDraw() {
     // widescreen: the game's cameras take the aspect the frame is rendered at (so they also cull
     // for it); 4:3 restores the original
     applyDisplayAspect();  // match window: a resize may cross the 21:9 limit
-    {
+    if (ownFrameAspect() <= 0.f) {  // (the game's cameras keep the setting's aspect through those)
         u32 w = 0, h = 0;
         AuroraGetRenderSize(&w, &h);
         if (s_appliedAspect > 0.f) setGameAspect(s_appliedAspect);
@@ -3279,6 +3490,7 @@ void menuDraw() {
             if (input::JoystickAccess joy; joy) {
                 lastIconsTb = now;
                 buttonIconsUpdate();
+                s_anyGamepad = SDL_HasGamepad();  // (the overlays' button names; no SDL call there)
             }
         }
     }
@@ -3328,6 +3540,141 @@ void menuDraw() {
         panel(fg, ImVec2(at.x - 8.f * ui, at.y - 5.f * ui), ImVec2(at.x + tw + 10.f * ui, at.y + px + 5.f * ui), 6.f * ui,
               IM_COL32(6, 14, 30, 170), IM_COL32(2, 6, 14, 190), alpha(kGold, 140), 1.f);
         drawText(fg, s_font, px, at, kGold, buf, 2.f * ui);
+    }
+    // the mouse in the game's menus (hle_game.cpp): its place in their layout, clicks and wheel
+    mouseTest();
+    RawMouse raw;
+    {
+        std::lock_guard lk(s_gameMouseMu);
+        raw = s_rawMouse;
+        s_rawMouse.moved = s_rawMouse.left = s_rawMouse.right = false;
+        s_rawMouse.wheel = 0;
+        if (!s_open && !s_launcher) {
+            float gx = 0.f, gy = 0.f;
+            s_gameMouse.inside = raw.known && windowToGame(ImVec2(raw.x, raw.y), gx, gy);
+            s_gameMouse.x = gx, s_gameMouse.y = gy;
+            s_gameMouse.moved |= raw.moved;
+            s_gameMouse.left |= raw.left;
+            s_gameMouse.right |= raw.right;
+            if (raw.wheel) s_gameMouse.wheel = raw.wheel;
+        }
+    }
+    // Overlays over the game (ZeDctr's Red Two Plus fork), in a font like its menus': the
+    // documentary's progress bar, the hold-to-skip ring, the audio commentary's state.
+    if (!s_open) {
+        // the 640 x (frame buffer lines) layout of the frame's 4:3 middle
+        const auto gameBox = [&](float& ox, float& oy, float& sx, float& sy) {
+            const float W = io.DisplaySize.x, H = std::max(io.DisplaySize.y, 1.f);
+            const float lines = float(std::clamp(viXfbLines(), 200u, 528u));
+            const float a = displayAspect() > 0.f ? displayAspect() : W / H;
+            float fw = W, fh = H;
+            if (W / H > a) fw = H * a;
+            else fh = W / a;
+            const float bw = fh * 4.f / 3.f;
+            ox = (W - fw) * 0.5f + (fw - bw) * 0.5f;
+            oy = (H - fh) * 0.5f;
+            sx = bw / 640.f;
+            sy = fh / lines;
+        };
+        const auto shadowText = [&](float px, ImVec2 at, ImU32 col, const char* txt, float sp, float a) {
+            const float sh = std::max(2.f, px * 0.08f);
+            drawText(fg, s_fontGame, px, ImVec2(at.x + sh, at.y + sh), IM_COL32(0, 0, 0, int(215 * a)), txt, sp);
+            drawText(fg, s_fontGame, px, at, col, txt, sp);
+        };
+        const MovieOverlay mv = movieOverlay();
+        if (mv.active && mv.totalSec > 0.0) {
+            float ox, oy, sx, sy;
+            gameBox(ox, oy, sx, sy);
+            const double actionAge = mv.lastActionTb ? double(now - mv.lastActionTb) / double(kTbClock) : 99.0;
+            if (mv.paused || actionAge < 2.0) {
+                const double el = std::clamp(mv.curSec, 0.0, mv.totalSec), rem = std::max(0.0, mv.totalSec - el);
+                char elBuf[16], remBuf[16];
+                snprintf(elBuf, sizeof elBuf, "%d:%02d", int(el + 0.5) / 60, int(el + 0.5) % 60);
+                snprintf(remBuf, sizeof remBuf, "-%d:%02d", int(rem + 0.5) / 60, int(rem + 0.5) % 60);
+                const float px = 23.f * sy, track = 0.6f * sx;
+                const float x0 = ox + 200.f * sx, x1 = ox + 440.f * sx, cy = oy + 408.f * sy, bh = 12.f * sy, gap = 14.f * sx;
+                fg->AddRectFilled(ImVec2(x0, cy - bh * 0.5f), ImVec2(x1, cy + bh * 0.5f), IM_COL32(115, 118, 124, 215));
+                const float frac = float(std::clamp(el / mv.totalSec, 0.0, 1.0));
+                if (frac > 0.f) fg->AddRectFilled(ImVec2(x0, cy - bh * 0.5f), ImVec2(x0 + (x1 - x0) * frac, cy + bh * 0.5f), IM_COL32(255, 255, 255, 255));
+                // the times centered on the bar by the digits' own height
+                const ImFontGlyph* g0 = s_fontGame->FindGlyph('0');
+                const float mid = g0 && s_fontGame->FontSize > 0.f ? (g0->Y0 + g0->Y1) * 0.5f * (px / s_fontGame->FontSize) : px * 0.46f;
+                shadowText(px, ImVec2(x0 - gap - textWidth(s_fontGame, px, elBuf, track), cy - mid), IM_COL32(255, 255, 255, 255), elBuf, track, 1.f);
+                shadowText(px, ImVec2(x1 + gap, cy - mid), IM_COL32(255, 255, 255, 255), remBuf, track, 1.f);
+            }
+            if (mv.paused) {  // the pause menu's rows (the game draws them: CONTINUE at y 230, BACK 264)
+                const ImVec2 mp(raw.x, raw.y);
+                const bool click = raw.left;
+                for (int i = 0; i < 2; i++) {
+                    const float ry = (i ? 264.f : 230.f) - 18.f;
+                    if (mp.x >= ox + 220.f * sx && mp.x <= ox + 420.f * sx && mp.y >= oy + (ry - 14.f) * sy && mp.y <= oy + (ry + 14.f) * sy)
+                        moviePauseMouse(i, click);
+                }
+            }
+        }
+        // hold B to skip: a ring in the bottom-right corner filling while B is held
+        const CutsceneSkipOverlay sk = cutsceneSkipOverlay();
+        if (sk.visible) {
+            const float a = sk.alpha, px = 38.f * ui, track = 1.f * ui, r = 18.f * ui, gap = 14.f * ui;
+            // the button: the controller's face bound to GameCube B, or the keyboard's key
+            static std::string keyName;
+            const bool pad = s_anyGamepad;
+            if (!pad && keyName.empty()) {
+                for (const auto& b : aurora::pad::bindings_for_control(aurora::pad::ProfileTarget::keyboard(0), aurora::pad::controls().b)) {
+                    keyName = aurora::binding::input_label(b.input, nullptr);
+                    break;
+                }
+                for (char& ch : keyName) ch = char(std::toupper((unsigned char)ch));
+            }
+            const std::string label = pad || keyName.empty() ? std::string("HOLD TO SKIP") : "HOLD " + keyName + " TO SKIP";
+            const float labelW = textWidth(s_fontGame, px, label.c_str(), track);
+            const float x0 = io.DisplaySize.x - 36.f * ui - (r * 2.f + gap + labelW), cy = io.DisplaySize.y - 44.f * ui;
+            const ImVec2 c(x0 + r, cy);
+            fg->AddCircle(c, r, IM_COL32(0, 0, 0, int(140 * a)), 32, 4.5f * ui);
+            fg->AddCircle(c, r, IM_COL32(255, 255, 255, int(115 * a)), 32, 3.f * ui);
+            if (sk.progress > 0.005f) {
+                constexpr float kPi = 3.14159265f;
+                fg->PathClear();
+                fg->PathArcTo(c, r, -kPi * 0.5f, -kPi * 0.5f + sk.progress * 2.f * kPi, 32);
+                fg->PathStroke(alpha(kGold, int(255 * a)), 0, 4.f * ui);
+            }
+            const ImU32 gc = alpha(sk.holding ? kGold : IM_COL32(255, 255, 255, 255), int(255 * a));
+            const float gR = 7.5f * ui, gT = 2.6f * ui;
+            if (pad) switch (const char glyph = buttonGlyphForGcB(); glyph) {
+            case 'x':
+                fg->AddLine(ImVec2(c.x - gR, c.y - gR), ImVec2(c.x + gR, c.y + gR), gc, gT);
+                fg->AddLine(ImVec2(c.x + gR, c.y - gR), ImVec2(c.x - gR, c.y + gR), gc, gT);
+                break;
+            case 'o': fg->AddCircle(c, gR * 1.05f, gc, 24, gT); break;
+            case 's': fg->AddRect(ImVec2(c.x - gR, c.y - gR), ImVec2(c.x + gR, c.y + gR), gc, 0.f, 0, gT); break;
+            case 't':
+                fg->AddTriangle(ImVec2(c.x, c.y - gR * 1.15f), ImVec2(c.x + gR * 1.1f, c.y + gR * 0.85f),
+                                ImVec2(c.x - gR * 1.1f, c.y + gR * 0.85f), gc, gT);
+                break;
+            default: {
+                const char txt[2] = {glyph, 0};
+                const float bPx = 22.f * ui;
+                shadowText(bPx, ImVec2(c.x - textWidth(s_fontGame, bPx, txt, 0.f) * 0.5f, c.y - bPx * 0.5f), gc, txt, 0.f, a);
+            }
+            }
+            shadowText(px, ImVec2(x0 + r * 2.f + gap, cy - px * 0.5f),
+                       sk.holding ? IM_COL32(255, 200, 64, int(255 * a)) : IM_COL32(255, 255, 255, int(255 * a)), label.c_str(), track, a);
+        }
+        // the audio commentary: paused, or for 6 s after a line starts, which button pauses it
+        const CommentaryOverlay co = commentaryOverlay();
+        if (co.active && (co.paused || co.secs < 6.0)) {
+            const std::string key = hotkeys::label(settings::HkCommentary, s_anyGamepad);
+            const char* line1 = co.paused ? "AUDIO COMMENTARY PAUSED" : "AUDIO COMMENTARY";
+            const std::string line2 = "PRESS " + key + (co.paused ? " TO RESUME" : " TO PAUSE");
+            const float px1 = 38.f * ui, px2 = 28.f * ui, t1 = 1.f * ui, t2 = 0.8f * ui;
+            const float cx = io.DisplaySize.x * 0.5f, y0 = io.DisplaySize.y - 90.f * ui;
+            const float fade = co.paused ? 1.f : float(std::clamp(6.0 - co.secs, 0.0, 1.0));
+            shadowText(px1, ImVec2(cx - textWidth(s_fontGame, px1, line1, t1) * 0.5f, y0),
+                       co.paused ? IM_COL32(185, 190, 198, int(240 * fade)) : IM_COL32(235, 215, 125, int(255 * fade)), line1, t1, fade);
+            if (key != "-")
+                shadowText(px2, ImVec2(cx - textWidth(s_fontGame, px2, line2.c_str(), t2) * 0.5f, y0 + px1 + 4.f * ui),
+                           co.paused ? IM_COL32(155, 160, 168, int(225 * fade)) : IM_COL32(255, 255, 255, int(245 * fade)), line2.c_str(), t2, fade);
+        }
     }
     // save state messages: 2.5 s at the top, fading out
     if (!s_toast.empty()) {
@@ -3395,7 +3742,7 @@ void menuDraw() {
             ++it;
         }
     }
-    if (cinematicSkip()) {
+    if (skipShown()) {
         const char* text = loc("SKIPPING");
         const float px = 34.f * ui;
         const float tw = textWidth(s_font, px, text, 8.f * ui);

@@ -2,14 +2,16 @@
 // libmain.so, Aurora's surface, and what the native side asks of Java (src/runtime/main.cpp
 // namespace android, achievements.cpp): the disc image from the document picker, restarting
 // the game, HTTP for RetroAchievements.
-package io.github.fhclimited.redtwo;
+package io.github.gminustwo.redtwo;
 
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 
@@ -32,6 +34,32 @@ public class RedTwoActivity extends SDLActivity {
     private static final Object sPickLock = new Object();
     private static boolean sPickDone;
     private static String sPicked;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);  // (loads libmain.so; the program starts later)
+        testEnvironment(getIntent());
+    }
+
+    /** Test builds only (debuggable: tools/build_android.ps1 -Debuggable): the launch intent's R2_*
+     *  extras become environment variables before the program starts, like the R2_* switches of
+     *  the PC builds (adb shell am start -n <package>/.RedTwoActivity --es R2_WATCHDOG 4). Set
+     *  through the native side (SDL's nativeSetenv): an arm64 library running under translation
+     *  (x86_64 emulators) has an environment of its own, which android.system.Os does not reach. */
+    private void testEnvironment(Intent intent) {
+        if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) == 0 || intent == null) return;
+        Bundle extras = intent.getExtras();
+        if (extras == null) return;
+        for (String key : extras.keySet()) {
+            Object value = extras.get(key);
+            if (!key.startsWith("R2_") || value == null) continue;
+            try {
+                nativeSetenv(key, value.toString());
+            } catch (Throwable e) {
+                return;  // (the library did not load: SDL shows its error)
+            }
+        }
+    }
 
     @Override
     protected String[] getLibraries() {

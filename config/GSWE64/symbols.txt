@@ -23,6 +23,7 @@
 80008720 VMIsiPager              # passed to VMInstallIsiVector
 80008BF0 VMInit                  # SDR1, segment 7, page table, handlers
 80006A40 main
+80041C04 AISrcInit             # SDK __AI_SRC_INIT: AICR 0xCC006C00 toggled 32 / 48 kHz, ticks of AISCNT timed with OSGetTime (calls at 0x80041C84 / 0x80041CC8 / 0x80041DB0), windows OSNanosecondsToTicks(31524 / 42024 +- 3000) at r13-17704..; callers 0x80041688, 0x8004177C, 0x8004186C
 # MusyX (identified against the MusyX decomp, MUSY_VERSION <= 2.0.0: its DSP ucode is byte-identical)
 8001D9EC salBuildCommandList   # nsDelay < 200 -> 10430 cycles; (nsDelay - 200) * busClock/400/5000 + 10430
 8002FEA4 MTXPerspective        # SDK (f1 fovY degrees, f2 aspect, f3 near, f4 far -> r3): the HUD's cameras (radar globe: callers 0x7FCD22C4, 0x7FCD4F60, 0x7FCD50F4, fov 100.4) pass the aspect their camera objects copied when created
@@ -95,3 +96,6 @@
 7FCB9544 CraftMask               # (mission r3, game mode r4 = [0x7FDE8258]) the craft a mission's hangar offers (bit per craft class): the craft code bits of +0x658 become a mask at r13-19980, then per-mission rules with the pilot's medals (AllMissionsMedal, MissionMedal). Found from the only reader of +0x658 bit 0x400 (a craft code's bit)
 7FCB9458 AllMissionsMedal        # (bonus too r3, level r4) every main (10) or every (17) mission's medal byte (pilot +12 + mission) at least r4 (missions 13/14 not counted); only the craft code calls it
 7FCB94E4 MissionMedal            # (mission r3, level r4) that mission's medal byte at least r4 (13/14: always); only the craft code calls it
+7FD8300C MovieUpdate             # (player r3, dt f1) advances a Factor 5 .movie player (+0xDC time, +0xE4 frame, +0x70 header: +0x04 fps, +0x0C frames, +0x14/+0x18 first frame size/offset; +0x38 the file's disc offset; +0x44..+0x64 streaming state) by dt and decodes the next frame when due. Cutscenes pass GameFrameDelta; the documentary / teaser screen (call at 0x7FD71564) passes a fixed constant (r2-0x3144), so it ran fast above 60 fps. From ZeDctr's Red Two Plus fork; the fixed step confirmed in the generated code
+7FD839A0 MovieEndDraw            # finishes drawing a .movie quad; the documentary / teaser screen calls it after its full-screen frame (return address 0x7FD712A4). From ZeDctr's Red Two Plus fork
+7FC06CA8 CardCheckSlot           # (slot r3, autoCreate r4, r5, r6) mounts the card and opens the game's save; with autoCreate set and no save (result 7) it creates one (0x7FC06930(slot, 1)). From ZeDctr's Red Two Plus fork

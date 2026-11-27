@@ -13,6 +13,8 @@
 #include <cstring>
 #include <iterator>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -89,48 +91,126 @@ static void gyroProbe(u32 craft, bool flying) {
     lastTb = tb;
 }
 
-// Skippable cutscenes (settings): the game has no skip for the crawl and most cutscenes, so a
-// press of B in a letterboxed cinematic (the VI shows 304 lines there, 450 in flight) runs the
-// game flat out until play resumes: retraces at kSkipHz, kSkipStep game seconds per frame
-// (8x a 60 fps frame: what cinematics were tested at), nothing drawn (gx_bridge.cpp), the
-// audio clock (AI DMA -> MusyX: sequencer, voices, streams) as fast and silent, disc reads
-// faster so streams keep up. It ends once the player's craft flies (state +0x370 = 0) in a
-// frame that is not letterboxed: between the crawl and the mission intro the game shows full
-// frames for a moment. Outside missions, after 3 s of full frames. And after kSkipMaxSeconds in
-// any case (issue #38): a skipped scene that leads into a letterboxed screen waiting for a button
-// never shows full frames, and the skip ran on at 600 Hz behind "Skipping..." until the player
-// closed the game. Skips take 0.7-4.5 s (a crawl and a mission intro ~3 s; #38's log).
+// Skippable cutscenes (settings): the game has no skip for the crawl and most cutscenes. Holding
+// B for kSkipHoldSecs in a letterboxed cinematic (the VI shows 304 lines there, 450 in flight)
+// first asks the game's own scene skip (SceneSkipAllowed answers yes once: the scene player goes
+// on to its next scene); a scene that does not ask within 0.25 s is run flat out until play
+// resumes: retraces at kSkipHz, kSkipStep game seconds per frame (8x a 60 fps frame: what
+// cinematics were tested at), nothing drawn (gx_bridge.cpp), the audio clock (AI DMA -> MusyX:
+// sequencer, voices, streams) as fast and silent, disc reads faster so streams keep up. That ends
+// once the player's craft flies (state +0x370 = 0) in a frame that is not letterboxed: between
+// the crawl and the mission intro the game shows full frames for a moment. Outside missions,
+// after 3 s of full frames. And after kSkipMaxSeconds in any case (issue #38): a skipped scene
+// that leads into a letterboxed screen waiting for a button never shows full frames, and the skip
+// ran on at 600 Hz behind "Skipping..." until the player closed the game. A ring in the corner
+// (gfx/menu.cpp) fills while B is held. Hold-to-skip, the game's own skip first and the ring are
+// from ZeDctr's Red Two Plus fork (github.com/ZeDctr/red_two_plus).
 constexpr double kSkipStep = 8.0 / 60.0;
 constexpr int kSkipHz = 600;
+constexpr double kSkipHoldSecs = 2.0;
 constexpr double kSkipMaxSeconds = 10.0;
 static bool s_skip = false;
-bool cinematicSkip() { return s_skip; }
+static bool s_bootSkipping = false;      // the boot screen run flat out (skip intro logos)
+static std::atomic<bool> s_skipDraws{false};
+// "SKIPPING" is shown only for a skip the player turned on or asked for: fast loading also runs the
+// loading screen before the intro (at boot and after leaving a mission) flat out, and that is no skip
+static std::atomic<bool> s_skipShown{false};
+static bool s_nativeSceneSkip = false;   // SceneSkipAllowed answers yes once
+static double s_nativeSkipFallbackSecs = 0.0;
+bool cinematicSkip() { return s_skipDraws.load(std::memory_order_relaxed); }
+bool skipShown() { return s_skipShown.load(std::memory_order_relaxed); }
+// the player's craft flies: not paused, in a cutscene or in the front end (invert Y, input.cpp)
+static std::atomic<bool> s_playerFlying{false};
+bool playerFlying() { return s_playerFlying.load(std::memory_order_relaxed); }
+
+namespace {
+struct CutsceneSkipState {
+    std::mutex mu;
+    bool active = false, holding = false;
+    float progress = 0.f;
+    u64 lastHintTb = 0;
+} s_skipUi;
+}  // namespace
+
+CutsceneSkipOverlay cutsceneSkipOverlay() {
+    std::lock_guard lk(s_skipUi.mu);
+    CutsceneSkipOverlay out;
+    if (!s_skipUi.active) return out;
+    if (s_skipUi.holding) {
+        out.visible = out.holding = true;
+        out.progress = s_skipUi.progress;
+        return out;
+    }
+    if (s_skipUi.lastHintTb) {  // a button pressed: the hint shows for 2.2 s, fading out
+        const double age = double(tbNow() - s_skipUi.lastHintTb) / double(kTbClock);
+        if (age < 2.2) {
+            out.visible = true;
+            out.alpha = age < 1.7 ? 1.f : float((2.2 - age) / 0.5);
+        }
+    }
+    return out;
+}
 
 // The game has a skip of its own for scenes seen before (this session): SceneSkipAllowed
 // (0x7FD56FD8; scene id r3) returns A pressed if SceneSeen (0x7FD56E5C) says so, scenes 13 and 23
 // always, and in game mode 5 (the attract demo) as its exit. The scene player (0x7FD544B8,
-// 0x7FD5540C, 0x7FD554DC) then goes on to the next scene, not to play: on a mission's second crawl
-// the next cutscene's music started about 2 s after the press while the crawl still scrolled,
-// the crawl faded a second later, and the cutscene opened on several seconds of stars before its
-// voices - it looked like the crawl went on under the next scene's sound. With skippable cutscenes
-// on, a skip the game allows starts ours too (as B does), straight to play.
-static bool s_gameSkipped = false;
+// 0x7FD5540C, 0x7FD554DC) then goes on to the next scene, not to play. With skippable cutscenes
+// on, that tap of A does nothing outside the attract demo (the hint shows instead): scenes skip
+// by holding B. The credits (13), the ending credits (14), the audio test (23) and front-end
+// screens 0x23 / 0x24 stand alone: holding B leaves them through the game's own exit.
+static bool standaloneScene() {
+    const u32 scene = rd32(0x7FDE822C);
+    const u8 screen = u8(rd8(0x800962EF));  // r13-19121: the front end's screen (0x15 boot, 0x04 title)
+    return scene == 13 || scene == 14 || scene == 23 || screen == 0x23 || screen == 0x24;
+}
+
 void hle_SceneSkipAllowed(Ctx& c) {
+    if (s_nativeSceneSkip) {
+        s_nativeSceneSkip = false;
+        s_nativeSkipFallbackSecs = 0.0;
+        logf("skip", "the game's own skip of scene %u", c.r[3]);
+        c.r[3] = 1;
+        return;
+    }
     f_7FD56FD8_orig(c);
-    if ((c.r[3] & 0xFF) && rd8(0x800962EF) != 5) s_gameSkipped = true;  // r13-19121: game mode
+    if (standaloneScene()) return;
+    if (settings::get().skipCutscenes && (c.r[3] & 0xFF) && rd8(0x800962EF) != 5) {
+        static u32 lastScene = ~0u;
+        if (const u32 scene = rd32(0x7FDE822C); scene != lastScene) {
+            lastScene = scene;
+            logf("skip", "scene %u: the game's own skip (A) held back, hold B to skip (mode %u, screen %02X)", scene,
+                 rd32(0x7FDE8254), rd8(0x800962EF));
+        }
+        c.r[3] = 0;
+        std::lock_guard lk(s_skipUi.mu);
+        s_skipUi.lastHintTb = tbNow();
+    }
 }
 
 // Skip intro logos (settings): the boot screen (mode 5, screen 22 at 0x7FDE8254/0x7FDE822C, see
 // the top-level loop 0x7FC00030) shows the legal notice, checks the memory card, then plays the
-// 3D LucasArts intro and the logos: 16x and silent, still drawn (the card dialogs may need an
-// answer), its logic (card checks, loads) as it is.
-static bool bootScreen() { return rd32(0x7FDE8254) == 5 && rd32(0x7FDE822C) == 22; }
+// 3D LucasArts intro and the logos; mode 6 with front-end screen 0x15 follows when the intro was
+// cut short. Run flat out like a skipped cinematic, at most kSkipMaxSeconds: a memory card dialog
+// waiting for an answer would not be drawn. Not the legal notice (mode 0): the memory card check
+// runs there, and at 600 Hz the game gave up on the card ("Memory Card is not inserted."). The
+// legal notice and the black loading screen before the intro keep countdowns of their own
+// (0x7FDE85C8, 0x7FDE8660) after the loading is done: those are cut short (with fast loading for
+// the loading screen). From ZeDctr's Red Two Plus fork; without the setting, holding B skips the
+// intro once.
+static bool bootScreen() {
+    const u32 mode = rd32(0x7FDE8254);
+    return (mode == 5 && rd32(0x7FDE822C) == 22) || (mode == 6 && rd8(0x800962EF) == 0x15);
+}
+static bool s_bootSkipStopped = false;  // ran kSkipMaxSeconds: not again until the boot is over
 
 static void keepHealth();
 static void keepAmmo();
 static void craftDiffProbe();
 static void resultsTest(Ctx& c);
 static void unlocksFrame();
+static bool moviePaused();
+static void commentaryUpdate(Ctx& c);
+static void mouseMenuUpdate(Ctx& c);
 
 void hle_GameFrameDelta(Ctx& c) {
     frameDelta(c);
@@ -141,18 +221,99 @@ void hle_GameFrameDelta(Ctx& c) {
     lastTb = tb;
 
     const bool cinematic = viXfbLines() < 400;
-    const bool b = (padState(0).buttons & 0x0200) != 0;  // PAD_BUTTON_B
-    static bool bWas = false;
-    const bool bPressed = b && !bWas;
-    bWas = b;
-    const bool gameSkipped = s_gameSkipped;
-    s_gameSkipped = false;
-    if (!s_skip && s.skipCutscenes && cinematic && (bPressed || gameSkipped)) {
-        s_skip = true;
-        logf("skip", "skipping to the next gameplay%s", bPressed ? "" : " (the game's own skip of a scene seen before)");
-        viSetRate(kSkipHz);
-        presentPaced(false);  // (V-Sync would hold the skip to the display's refresh)
-        setDvdBoost(50.0);
+    const PadState pad = padState(0);
+    const bool b = !gfx::menuOpen() && (pad.buttons & 0x0200) != 0;         // PAD_BUTTON_B
+    const bool anyBtn = !gfx::menuOpen() && (pad.buttons & 0x1F00) != 0;  // A, B, X, Y, START
+    static bool anyWas = false;
+    const bool anyPressed = anyBtn && !anyWas;
+    anyWas = anyBtn;
+
+    // GameFrameDelta called from the boot screen's loading loop (0x7FC03074, through 0x7FC03BC4):
+    // the legal notice (mode 0) and the black screen before the intro (mode 5, screen 22) wait
+    // out countdowns of their own once the loading is done. Cut short (0x7FDE8660 kept just
+    // above 0 so its end, 0x7FD4CFDC(0x7D0), still runs this frame).
+    const u32 mode = rd32(0x7FDE8254);
+    const bool inBootSplash = c.lr == 0x7FC03BDCu && mode == 0;
+    const bool inPreIntroLoad = c.lr == 0x7FC03BDCu && mode == 5 && rd32(0x7FDE8258) == 22;
+    if ((inPreIntroLoad && (s.fastDisc || s.skipLogos)) || (inBootSplash && s.skipLogos)) {
+        if (s2d(rd32(0x7FDE85C8)) > 0.0) wr32(0x7FDE85C8, 0);
+        if (s2d(rd32(0x7FDE8660)) > 0.001) wr32(0x7FDE8660, d2s(rsingle(0.001)));
+    }
+
+    static double skipHold = 0.0;  // seconds B has been held
+    static bool skipBootOnce = false;
+    const bool inBoot = bootScreen();  // (not the legal notice, inBootSplash: see bootScreen)
+    const bool inFrontEndMenu = mode == 6;  // the front end (also its letterboxed audio test)
+    const bool inStandaloneScene = standaloneScene();
+    if (!inBoot) skipBootOnce = s_bootSkipStopped = false;
+    if (!cinematic) {
+        s_nativeSceneSkip = false;
+        s_nativeSkipFallbackSecs = 0.0;
+    }
+    const bool canSkipBoot = inBoot && !s.skipLogos && !skipBootOnce && s.skipCutscenes;
+    const bool canSkip = !s_skip && !s_nativeSceneSkip && !inStandaloneScene && s.skipCutscenes &&
+                         ((!inFrontEndMenu && cinematic) || canSkipBoot);
+    skipHold = canSkip && b ? skipHold + real : 0.0;
+    {
+        std::lock_guard lk(s_skipUi.mu);
+        s_skipUi.active = canSkip;
+        s_skipUi.holding = canSkip && b;
+        s_skipUi.progress = canSkip ? float(std::clamp(skipHold / kSkipHoldSecs, 0.0, 1.0)) : 0.f;
+        if (canSkip && anyPressed) s_skipUi.lastHintTb = tb;
+        if (!canSkip) s_skipUi.lastHintTb = 0;
+    }
+    if (canSkip && skipHold >= kSkipHoldSecs) {
+        skipHold = 0.0;
+        if (canSkipBoot) {
+            skipBootOnce = true;
+            logf("skip", "skipping the intro and logos (B held)");
+        } else {
+            s_nativeSceneSkip = true;
+            s_nativeSkipFallbackSecs = inStandaloneScene ? 0.0 : 0.25;
+            logf("skip", "B held: asking the game's own scene skip");
+        }
+    }
+    if (s_nativeSceneSkip && s_nativeSkipFallbackSecs > 0.0) {
+        s_nativeSkipFallbackSecs -= real;
+        if (s_nativeSkipFallbackSecs <= 0.0) {
+            s_nativeSceneSkip = false;
+            s_nativeSkipFallbackSecs = 0.0;
+            if (!inFrontEndMenu && cinematic) {
+                s_skip = true;
+                logf("skip", "the scene has no skip of its own: running it flat out to the next gameplay");
+                viSetRate(kSkipHz);
+                presentPaced(false);  // (V-Sync would hold the skip to the display's refresh)
+                setDvdBoost(50.0);
+            }
+        }
+    }
+    // the boot screen run flat out: skip intro logos, B held once, or the loading screen before
+    // the intro with fast loading
+    static double bootSkipFor = 0;
+    const bool wantBootSkip =
+        !s_bootSkipStopped && ((((s.skipLogos || skipBootOnce) && inBoot) || (inPreIntroLoad && s.fastDisc)));
+    bootSkipFor = s_bootSkipping ? bootSkipFor + real : 0;
+    if (s_bootSkipping && bootSkipFor > kSkipMaxSeconds && inBoot) {
+        s_bootSkipStopped = true;
+        logf("skip", "boot skip stopped after %.0f s (a memory card question waiting for an answer?): normal speed", bootSkipFor);
+    }
+    if ((wantBootSkip && !s_bootSkipStopped) != s_bootSkipping) {
+        s_bootSkipping = !s_bootSkipping;
+        if (s_bootSkipping) {
+            viSetRate(kSkipHz);
+            presentPaced(false);
+            setDvdBoost(50.0);
+        } else {
+            if (s.skipLogos || skipBootOnce)
+                logf("skip", "boot screen done after %.1f s", bootSkipFor);
+            else
+                logf("skip", "loading screen before the intro run fast (fast loading) for %.1f s", bootSkipFor);
+            if (!s_skip) {
+                viSetRateHz(frameRateHz());
+                presentPaced(true);
+                setDvdBoost(1.0);
+            }
+        }
     }
     static double fullFor = 0;  // real seconds of frames that are not letterboxed while skipping
     fullFor = s_skip && !cinematic ? fullFor + real : 0;
@@ -162,7 +323,7 @@ void hle_GameFrameDelta(Ctx& c) {
     static int flyingFrames = 0;  // (the craft passes through state 0 while it is set up)
     flyingFrames = !cinematic && craft && rd32(craft + 0x370) == 0 ? flyingFrames + 1 : 0;
     const bool skipTooLong = s_skip && skipFor > kSkipMaxSeconds;
-    if (s_skip && (!s.skipCutscenes || flyingFrames >= 10 || fullFor > 3.0 || skipTooLong)) {
+    if (s_skip && (!s.skipCutscenes || inFrontEndMenu || flyingFrames >= 10 || fullFor > 3.0 || skipTooLong)) {
         s_skip = false;
         if (skipTooLong)
             logf("skip", "stopped after %.0f s: still %s, no flying craft (a screen waiting for a button?); "
@@ -174,14 +335,15 @@ void hle_GameFrameDelta(Ctx& c) {
         presentPaced(true);
         setDvdBoost(1.0);
     }
-    if (s_skip) {
+    // (the front end is drawn while the boot skip runs into it: screen 0x15 leads to the title)
+    s_skipDraws.store(s_skip || (s_bootSkipping && !inFrontEndMenu), std::memory_order_relaxed);
+    s_skipShown.store(s_skip || (s_bootSkipping && !inFrontEndMenu && (s.skipLogos || skipBootOnce)),
+                      std::memory_order_relaxed);
+    if (s_skip || s_bootSkipping) {
         c.f[1] = c.ps1[1] = rsingle(kSkipStep);
         setAudioSpeed(std::min(kSkipStep / real, 64.0), true);
-    } else if (s.skipLogos && bootScreen()) {
-        c.f[1] = c.ps1[1] = rsingle(c.f[1] * 16.0);
-        setAudioSpeed(16.0, true);
     } else {
-        setAudioSpeed(1.0, false);
+        setAudioSpeed(1.0, moviePaused());  // (a paused documentary: silent)
     }
     // VR haptics (both Touch controllers): firing - faint for a laser shot, hard for a secondary
     // weapon (torpedoes, missiles, bombs) - from the mission's stats (0x7FDF04F0, see
@@ -245,6 +407,8 @@ void hle_GameFrameDelta(Ctx& c) {
     craftDiffProbe();
     resultsTest(c);
     unlocksFrame();
+    commentaryUpdate(c);
+    mouseMenuUpdate(c);
     // widescreen: the flight HUD goes to the screen edges (not the menus: their layout is 4:3).
     // Nor the pause screen, drawn while the craft exists: its objectives' check marks and dots
     // sit left of the centered text and were moved out to the left (by the 4:3 margin, 240 px
@@ -277,6 +441,7 @@ void hle_GameFrameDelta(Ctx& c) {
         else if (gameState == 3) phase = Phase::FrontEnd;
         else if (craft) phase = Phase::Flying;
         discord::gameFrame(phase);
+        s_playerFlying.store(phase == Phase::Flying, std::memory_order_relaxed);
     }
     // R2_DT_LOG: every 10 s, frames and the game time they advanced against the wall clock
     static const bool dtLog = envFlag("R2_DT_LOG");
@@ -611,7 +776,7 @@ static PortTable s_portTables[] = {
     {"heightmap terrain rows", 0x7FD8A3C8u, 0x10100, 0x2FF00},  // HeightTerrainSetup (~95 KB in Yavin)
     {"heightmap visible-tile list", kTileListRet, 0x40100, kTileListBytes * kTileListScale},  // HeightTerrainLists
 };
-static_assert(0x40100 + kTileListBytes * kTileListScale <= kPortArenaSize);
+static_assert(0x40100 + kTileListBytes * kTileListScale <= kPortScratch - kPortArena);  // (the scratch comes after)
 
 void hle_HeapAlloc(Ctx& c) {
     const u32 lr = c.lr;
@@ -1394,6 +1559,705 @@ void hleLoadState(state::Reader& r) {
     r.pod(s_extInUse), r.pod(s_extPeak);
 }
 
+// ---- From ZeDctr's Red Two Plus fork (github.com/ZeDctr/red_two_plus) ---------------------------
+// The documentary / teaser player's speed, seeking and pause menu, the memory card's first save,
+// pausing the audio commentary and the mouse in the game's own menus. These hooks call the game's
+// own text, sound and menu code.
+namespace {
+// A hook calling the game's functions gives them a frame of their own on the guest stack (a
+// callee stores its LR at 4(r1)) and afterwards puts back the registers they may change (r0,
+// r3-r12, f0-f13, CR, CTR, XER): a hook that goes on to the original function passes it its own
+// arguments, and GameFrameDelta's result stays in f1.
+struct GuestFrame {
+    Ctx& c;
+    u32 sp, lr, ctr, so, ov, ca;
+    u32 gpr[13];
+    double fpr[14], ps[14];
+    u8 cr[8];
+    explicit GuestFrame(Ctx& c) : c(c), sp(c.r[1]), lr(c.lr), ctr(c.ctr), so(c.so), ov(c.ov), ca(c.ca) {
+        memcpy(gpr, c.r, sizeof gpr);
+        memcpy(fpr, c.f, sizeof fpr);
+        memcpy(ps, c.ps1, sizeof ps);
+        memcpy(cr, c.cr, sizeof cr);
+        wr32(sp - 0x20u, sp);  // back chain
+        c.r[1] = sp - 0x20u;
+    }
+    ~GuestFrame() {
+        const u32 r2 = c.r[2];
+        memcpy(c.r, gpr, sizeof gpr);
+        c.r[1] = sp, c.r[2] = r2;
+        memcpy(c.f, fpr, sizeof fpr);
+        memcpy(c.ps1, ps, sizeof ps);
+        memcpy(c.cr, cr, sizeof cr);
+        c.lr = lr, c.ctr = ctr, c.so = so, c.ov = ov, c.ca = ca;
+    }
+};
+
+// strings the game's text code points at, and the rectangle its bounds function fills (runtime.h
+// kPortScratch: the port arena's last 4 KiB, saved in states)
+constexpr u32 kScratchBox = kPortScratch;  // 4 floats
+constexpr u32 kStrPaused = kPortScratch + 0x100;
+constexpr u32 kStrContinue = kPortScratch + 0x110;
+constexpr u32 kStrBack = kPortScratch + 0x128;
+
+void writeGuestString(u32 addr, const char* s) {
+    u32 k = 0;
+    do wr8(addr + k, u8(s[k]));
+    while (s[k++] != '\0');
+}
+
+// The front end's text: a menu object (r13-0x4AB8; byte +0 = 0x26) keeps 70 text slots of 108
+// bytes per page (+0x3B80 the first, +0x3BA4 how many are used, +0x3BA5 + page per page, page
+// +0x3E) and the selection (+0x23, items from +0x25 to +0x24, +0x02 = 1 a row of items). Slot
+// functions (slot r3): 0x7FD3E418 its text (r4: ASCII), 0x7FD3E9B8 shown (r4), 0x7FD3E9C0
+// alignment (r4: 2 centered), 0x7FD3EA1C scale (f1), 0x7FD3E9D4 shadow (r4 on, f1 f2 offset, f3
+// opacity), 0x7FD3EA00 color (r5-r8 RGBA), 0x7FD3EB1C its bounds (r4-r7: min x, max x, min y, max
+// y). 0x7FD58DD8 looks up a string id (r3) and 0x7FD58EF0 sets a slot up from it (r3 string, r4
+// slot, f1 f2 position). 0x7FD5123C plays a menu sound (r3: 0x1E5 move, 0x1E1 select).
+}  // namespace
+
+// ---- The documentary / teaser player (Options > Special Features) ------------------------------
+// MovieUpdate (0x7FD8300C; player r3, dt f1) advances a Factor 5 .movie. Cutscenes pass the frame
+// delta; the documentary / teaser screen (its call at 0x7FD71564) passes a fixed 1/60 s
+// (r2-0x3144), so above 60 fps the video ran fast (2.4x at 144) and left its sound behind: there
+// it gets the frame's delta (0x7FDE8288). The player also gets seeking (left / right: 5 s, held:
+// repeats), a pause menu instead of A / B / START ending it (CONTINUE / BACK in the game's own
+// font, through the text layer pass the screen otherwise skips; MovieEndDraw) and a progress bar
+// (gfx/menu.cpp) while paused and for 2 s after a seek. Seeking needs each frame's place in the
+// file: a thread walks the frame headers (each frame starts with the next one's size).
+namespace {
+constexpr u32 kDocUpdateRet = 0x7FD71568u;  // MovieUpdate's call in the documentary screen
+constexpr u32 kDocDrawRet = 0x7FD712A4u;    // MovieEndDraw's call after its full-screen frame
+
+struct MovieIndex {
+    std::mutex mu;
+    u32 discStart = 0;
+    bool building = false, ready = false;
+    std::vector<std::pair<u32, u32>> frames;  // (offset in the file, size) per frame
+} s_movieIdx;
+
+struct MovieUiState {
+    std::mutex mu;
+    u64 lastActiveTb = 0;
+    bool paused = false;
+    int pauseSel = 0;
+    double curSec = 0.0, totalSec = 0.0;
+    u64 lastActionTb = 0;
+} s_movieUi;
+
+bool s_moviePausedFlag = false;
+u32 s_movieMenuObj = 0;
+std::atomic<int> s_movieMouseHover{-1};
+std::atomic<bool> s_movieMouseClick{false};
+std::atomic<u64> s_fullscreenMovieTb{0};
+
+void ensureMovieIndex(u32 discStart, u32 totalFrames, u32 firstOff, u32 firstSize) {
+    {
+        std::lock_guard lk(s_movieIdx.mu);
+        if (s_movieIdx.discStart == discStart && (s_movieIdx.ready || s_movieIdx.building)) return;
+        s_movieIdx.discStart = discStart;
+        s_movieIdx.building = true;
+        s_movieIdx.ready = false;
+        s_movieIdx.frames.clear();
+    }
+    std::thread([discStart, totalFrames, firstOff, firstSize] {
+        std::vector<std::pair<u32, u32>> idx;
+        if (totalFrames > 0 && totalFrames < 1000000) {
+            idx.reserve(totalFrames);
+            u32 off = firstOff, sz = firstSize;
+            for (u32 i = 0; i < totalFrames && sz >= 32; i++) {
+                idx.emplace_back(off, sz);
+                u8 h[4];
+                if (!discRead(u64(discStart) + u64(off), h, 4)) break;
+                off += sz;
+                sz = u32(h[0]) << 24 | u32(h[1]) << 16 | u32(h[2]) << 8 | h[3];
+            }
+        }
+        std::lock_guard lk(s_movieIdx.mu);
+        if (s_movieIdx.discStart == discStart) {
+            s_movieIdx.frames = std::move(idx);
+            s_movieIdx.ready = !s_movieIdx.frames.empty();
+            s_movieIdx.building = false;
+            logf("movie", "%zu frames indexed for seeking", s_movieIdx.frames.size());
+        }
+    }).detach();
+}
+
+// the pause menu in the game's own font: text slots 10-12 of the screen's menu object
+void movieNativeUi(Ctx& c, u32 menuObj, bool paused, int pauseSel) {
+    if (menuObj < 0x7FC00000u || menuObj >= 0x81800000u) return;
+    static u32 s_initMenuObj = 0;
+    static u8 s_initPage = 0xFF;
+    static int s_lastSel = -1;
+    static bool s_lastPaused = false;
+    const u8 page = u8(rd8(menuObj + 0x3E));
+    const u32 slotBase = rd32(menuObj + 0x3B80);
+    if (slotBase < 0x7FC00000u) return;
+    s_movieMenuObj = menuObj;
+    GuestFrame frame(c);
+    if (s_initMenuObj != menuObj || s_initPage != page || rd8(menuObj + 0x3BA4) < 13) {
+        s_initMenuObj = menuObj;
+        s_initPage = page;
+        s_lastSel = -1;
+        s_lastPaused = !paused;
+        writeGuestString(kStrPaused, "PAUSED");
+        writeGuestString(kStrContinue, "CONTINUE");
+        writeGuestString(kStrBack, "BACK");
+        c.r[3] = 0x7FDE3428u;  // (a string id of the front end's: the slots' template)
+        f_7FD58DD8(c);
+        const u32 tmpl = c.r[3];
+        const auto initSlot = [&](u32 idx, double x, double y, double scale, u32 str, u8 r, u8 g, u8 b) {
+            const u32 slot = slotBase + idx * 108u;
+            c.r[3] = tmpl, c.r[4] = slot, c.r[5] = 0;
+            c.f[1] = c.ps1[1] = rsingle(x);
+            c.f[2] = c.ps1[2] = rsingle(y);
+            f_7FD58EF0(c);
+            wr32(rd32(menuObj + 0x4508) + idx * 4u, 0xFFFFFFFFu);  // (no menu row)
+            c.r[3] = slot, c.r[4] = str;
+            f_7FD3E418(c);
+            c.r[3] = slot, c.r[4] = 2;  // centered
+            f_7FD3E9C0(c);
+            c.r[3] = slot;
+            c.f[1] = c.ps1[1] = rsingle(scale);
+            f_7FD3EA1C(c);
+            c.r[3] = slot, c.r[4] = 1;  // the drop shadow of the game's own pause menu
+            c.f[1] = c.ps1[1] = rsingle(2.0);
+            c.f[2] = c.ps1[2] = rsingle(2.0);
+            c.f[3] = c.ps1[3] = rsingle(0.75);
+            f_7FD3E9D4(c);
+            c.r[3] = slot, c.r[4] = 0, c.r[5] = r, c.r[6] = g, c.r[7] = b, c.r[8] = 0xFF;
+            f_7FD3EA00(c);
+            c.r[3] = slot, c.r[4] = 0;
+            f_7FD3E9B8(c);
+        };
+        initSlot(10, 320.0, 178.0, 0.85, kStrPaused, 0xFF, 0xE0, 0x60);
+        initSlot(11, 320.0, 230.0, 0.62, kStrContinue, 0xFF, 0xFF, 0xFF);
+        initSlot(12, 320.0, 264.0, 0.62, kStrBack, 0xFF, 0xFF, 0xFF);
+        if (rd8(menuObj + 0x3BA4) < 13) {
+            wr8(menuObj + 0x3BA4, 13);
+            wr8(menuObj + 0x3BA5 + page, 13);
+        }
+    }
+    if (paused != s_lastPaused) {
+        s_lastPaused = paused;
+        s_lastSel = -1;
+        for (u32 idx = 10; idx <= 12; idx++) {
+            c.r[3] = slotBase + idx * 108u, c.r[4] = paused ? 1 : 0;
+            f_7FD3E9B8(c);
+        }
+    }
+    if (paused) {
+        // the selected row pulses yellow <-> red like the game's own pause menu
+        const double t = 0.5 + 0.5 * std::sin(double(tbNow()) / double(kTbClock) * 5.2);
+        for (int i = 0; i < 2; i++) {
+            if (i != pauseSel && pauseSel == s_lastSel) continue;
+            c.r[3] = slotBase + u32(11 + i) * 108u, c.r[4] = 0;
+            if (i == pauseSel)
+                c.r[5] = 0xFF, c.r[6] = u32(std::lround(42.0 + t * 190.0)), c.r[7] = u32(std::lround(20.0 + t * 28.0));
+            else
+                c.r[5] = c.r[6] = c.r[7] = 0xFF;
+            c.r[8] = 0xFF;
+            f_7FD3EA00(c);
+        }
+        s_lastSel = pauseSel;
+    }
+}
+}  // namespace
+
+static bool moviePaused() { return s_moviePausedFlag; }
+
+bool movieFullscreenActive() {
+    const u64 t = s_fullscreenMovieTb.load(std::memory_order_relaxed);
+    return t != 0 && tbNow() - t < kTbClock / 4;
+}
+
+MovieOverlay movieOverlay() {
+    std::lock_guard lk(s_movieUi.mu);
+    MovieOverlay out;
+    if (s_movieUi.lastActiveTb && tbNow() - s_movieUi.lastActiveTb < kTbClock / 4) {
+        out.active = true;
+        out.paused = s_movieUi.paused;
+        out.pauseSel = s_movieUi.pauseSel;
+        out.curSec = s_movieUi.curSec;
+        out.totalSec = s_movieUi.totalSec;
+        out.lastActionTb = s_movieUi.lastActionTb;
+    }
+    return out;
+}
+
+void moviePauseMouse(int sel, bool click) {
+    if (sel >= 0 && sel <= 1) s_movieMouseHover.store(sel, std::memory_order_relaxed);
+    if (click) s_movieMouseClick.store(true, std::memory_order_relaxed);
+}
+
+void hle_MovieUpdate(Ctx& c) {
+    if (c.lr != kDocUpdateRet) return f_7FD8300C_orig(c);  // cutscenes, SELECT MISSION's hologram
+    const u32 p = c.r[3];
+    const u32 hdr = p ? rd32(p + 0x70) : 0;
+    const bool exiting = rd8(c.r[13] + 0xFFFFB590u) != 0;
+    static u32 lastPlayer = 0, logFrame = 0;
+    static int pendingFrames = 0, lastDir = 0, pauseSel = 0, lastVert = 0;
+    static u64 nextRepeatTb = 0, logTb = 0;
+    static bool startWas = false;
+    if (!hdr || rd8(p + 0xE9) != 0 || exiting) {
+        if (s_moviePausedFlag) {
+            s_moviePausedFlag = false;
+            setAudioSpeed(1.0, false);
+        }
+        s_movieMenuObj = 0;
+        return f_7FD8300C_orig(c);
+    }
+    const u64 now = tbNow();
+    s_fullscreenMovieTb.store(now, std::memory_order_relaxed);
+    const double fps = s2d(rd32(hdr + 0x04));
+    const u32 totalFrames = rd32(hdr + 0x0C);
+    const u32 curFrame = rd32(p + 0xE4);
+    const u32 discStart = rd32(p + 0x38);
+    const u32 firstSize = rd32(hdr + 0x14), firstOff = rd32(hdr + 0x18);
+    const auto minSec = [](double s) {
+        char b[16];
+        const int t = int(s + 0.5);
+        snprintf(b, sizeof b, "%d:%02d", t / 60, t % 60);
+        return std::string(b);
+    };
+    if (p != lastPlayer) {
+        lastPlayer = p;
+        s_moviePausedFlag = false;
+        pauseSel = pendingFrames = lastDir = lastVert = 0;
+        logTb = now, logFrame = curFrame;
+        std::lock_guard lk(s_movieUi.mu);
+        s_movieUi.paused = false;
+        s_movieUi.pauseSel = 0;
+        s_movieUi.lastActionTb = 0;
+        if (fps > 1.0) logf("movie", "documentary / teaser: %u frames at %.2f fps (%s)", totalFrames, fps, minSec(totalFrames / fps).c_str());
+    }
+    const auto moved = [&] { logTb = now, logFrame = rd32(p + 0xE4); };  // (the speed log starts over)
+    if (discStart && totalFrames > 0 && fps > 1.0) {
+        ensureMovieIndex(discStart, totalFrames, firstOff, firstSize);
+        // the game's exit buttons (menu object r31 +0x6699: 0x10 A, 0x20 B) open the pause menu
+        const u32 menuObj = c.r[31];
+        const u8 rawBtn = menuObj ? u8(rd8(menuObj + 0x6699)) : 0;
+        if (menuObj) wr8(menuObj + 0x6699, rawBtn & ~0x30u);
+        const PadState pad = padState(0);
+        const bool menuOpen = gfx::menuOpen();
+        const bool startNow = !menuOpen && (pad.buttons & 0x1000) != 0;
+        const bool startPressed = startNow && !startWas;
+        startWas = startNow;
+        const bool accept = !menuOpen && ((rawBtn & 0x10) || startPressed);
+        const bool back = !menuOpen && (rawBtn & 0x20);
+        const double curSec = double(curFrame) / fps, totalSec = double(totalFrames) / fps;
+        if (!s_moviePausedFlag && (accept || back)) {
+            s_moviePausedFlag = true;
+            pauseSel = 0;  // CONTINUE
+            setAudioSpeed(1.0, true);
+            logf("movie", "paused at %s", minSec(curSec).c_str());
+            {
+                std::lock_guard lk(s_movieUi.mu);
+                s_movieUi.lastActiveTb = s_movieUi.lastActionTb = now;
+                s_movieUi.paused = true;
+                s_movieUi.pauseSel = 0;
+                s_movieUi.curSec = curSec;
+                s_movieUi.totalSec = totalSec;
+            }
+            if (menuObj) movieNativeUi(c, menuObj, true, 0);
+            return;
+        }
+        if (s_moviePausedFlag) {
+            bool choose = accept, resume = back;
+            if (!menuOpen) {
+                const bool up = (pad.buttons & 0x0008) || pad.stickY > 188;
+                const bool down = (pad.buttons & 0x0004) || pad.stickY < 68;
+                const int vert = down ? 1 : up ? -1 : 0;
+                if (vert != 0 && vert != lastVert) pauseSel = vert > 0 ? 1 : 0;
+                lastVert = vert;
+                if (const int hover = s_movieMouseHover.exchange(-1, std::memory_order_relaxed); hover >= 0) pauseSel = hover;
+                if (s_movieMouseClick.exchange(false, std::memory_order_relaxed)) choose = true;
+            }
+            if (resume || (choose && pauseSel == 0)) {
+                s_moviePausedFlag = false;
+                setAudioSpeed(1.0, false);
+                logf("movie", "continued at %s", minSec(curSec).c_str());
+                moved();
+                std::lock_guard lk(s_movieUi.mu);
+                s_movieUi.paused = false;
+                s_movieUi.lastActionTb = now;
+            } else if (choose) {
+                // BACK: the game's own exit (its B)
+                s_moviePausedFlag = false;
+                setAudioSpeed(1.0, false);
+                logf("movie", "left at %s", minSec(curSec).c_str());
+                if (menuObj) {
+                    movieNativeUi(c, menuObj, false, 0);
+                    wr8(menuObj + 0x6699, rawBtn | 0x20);
+                }
+                s_movieMenuObj = 0;
+                {
+                    std::lock_guard lk(s_movieUi.mu);
+                    s_movieUi.paused = false;
+                    s_movieUi.lastActiveTb = 0;
+                }
+                s_fullscreenMovieTb.store(0, std::memory_order_relaxed);
+                return f_7FD8300C_orig(c);
+            }
+            if (s_moviePausedFlag) {
+                setAudioSpeed(1.0, true);
+                {
+                    std::lock_guard lk(s_movieUi.mu);
+                    s_movieUi.lastActiveTb = now;
+                    s_movieUi.paused = true;
+                    s_movieUi.pauseSel = pauseSel;
+                    s_movieUi.curSec = curSec;
+                    s_movieUi.totalSec = totalSec;
+                }
+                if (menuObj) movieNativeUi(c, menuObj, true, pauseSel);
+                return;  // (the movie holds its frame)
+            }
+        }
+        {
+            std::lock_guard lk(s_movieUi.mu);
+            s_movieUi.lastActiveTb = now;
+            s_movieUi.paused = false;
+            s_movieUi.curSec = curSec;
+            s_movieUi.totalSec = totalSec;
+        }
+        if (menuObj) movieNativeUi(c, menuObj, false, pauseSel);
+        // left / right (d-pad, stick, arrow keys): 5 s, repeating while held
+        if (!menuOpen) {
+            const bool left = (pad.buttons & 0x0001) || pad.stickX < 68;
+            const bool right = (pad.buttons & 0x0002) || pad.stickX > 188;
+            const int dir = right ? 1 : left ? -1 : 0;
+            if (dir != 0) {
+                if (dir != lastDir || now >= nextRepeatTb) {
+                    pendingFrames += dir * std::max(1, int(std::lround(5.0 * fps)));
+                    nextRepeatTb = now + (dir != lastDir ? kTbClock * 40 / 100 : kTbClock * 25 / 100);
+                    std::lock_guard lk(s_movieUi.mu);
+                    s_movieUi.lastActionTb = now;
+                }
+            } else {
+                nextRepeatTb = 0;
+            }
+            lastDir = dir;
+        }
+        if (pendingFrames != 0) {
+            std::pair<u32, u32> at{0, 0};
+            u32 target = 0;
+            bool have = false;
+            {
+                std::lock_guard lk(s_movieIdx.mu);
+                if (s_movieIdx.discStart == discStart && s_movieIdx.ready) {
+                    target = u32(std::clamp(int(curFrame) + pendingFrames, 0, int(s_movieIdx.frames.size()) - 1));
+                    at = s_movieIdx.frames[target];
+                    have = true;
+                }
+            }
+            if (have) {
+                if (rd8(p + 0x44) != 0) {
+                    wr8(p + 0x45, 0);  // a read in flight: stop streaming, seek next frame
+                } else {
+                    wr32(p + 0x48, at.first);   // next read: offset
+                    wr32(p + 0x4C, at.second);  // size
+                    wr32(p + 0x50, target);     // its frame
+                    wr32(p + 0xE4, target);     // the current frame
+                    wr32(p + 0x5C, 0);          // video, audio read and write indices
+                    wr32(p + 0x60, 0);
+                    wr32(p + 0x64, 0);
+                    wr32(p + 0xDC, 0);  // time toward the next frame
+                    wr8(p + 0x45, 1);   // streaming again
+                    pendingFrames = 0;
+                    logf("movie", "seek to %s", minSec(double(target) / fps).c_str());
+                    logTb = now, logFrame = target;
+                    std::lock_guard lk(s_movieUi.mu);
+                    s_movieUi.curSec = double(target) / fps;
+                    s_movieUi.lastActionTb = now;
+                }
+            }
+        }
+        // the frame rate it plays at, every 10 s (the speed fix's evidence in the log)
+        if (now - logTb >= 10 * kTbClock) {
+            const double secs = double(now - logTb) / double(kTbClock);
+            logf("movie", "frame %u of %u: %.1f frames a second over %.0f s (the movie's own %.2f)", curFrame, totalFrames,
+                 double(int(curFrame) - int(logFrame)) / secs, secs, fps);
+            logTb = now, logFrame = curFrame;
+        }
+    }
+    // above 59.94 Hz: the frame's real time instead of the screen's fixed 1/60 s
+    if (viRate() > 60.5) c.f[1] = c.ps1[1] = s2d(rd32(0x7FDE8288));
+    f_7FD8300C_orig(c);
+}
+
+// MovieEndDraw (0x7FD839A0): the documentary screen (0x13) calls it after its full-screen frame
+// and skips the front end's text layer pass (0x7FD6B46C -> 0x7FD3F324): while paused, that pass
+// runs here over the video for the pause menu, with the other page's slots hidden meanwhile.
+void hle_MovieEndDraw(Ctx& c) {
+    const u32 callerLr = c.lr;
+    f_7FD839A0_orig(c);
+    if (callerLr != kDocDrawRet || !s_moviePausedFlag) return;
+    const u32 menuObj = s_movieMenuObj;
+    if (menuObj < 0x7FC00000u || menuObj >= 0x81800000u) return;
+    if (rd32(0x80096200) == 0 || rd32(0x80096220) == 0) return;
+    GuestFrame frame(c);
+    const u8 page = u8(rd8(menuObj + 0x3E) & 1);
+    const u32 otherBase = menuObj + 0x70 + u32(page ^ 1) * 7560u;
+    u8 shown[70];
+    for (int i = 0; i < 70; i++) {
+        const u32 slot = otherBase + u32(i) * 108u;
+        c.r[3] = slot;
+        f_7FD3EA50(c);
+        shown[i] = u8(c.r[3]);
+        if (shown[i]) {
+            c.r[3] = slot, c.r[4] = 0;
+            f_7FD3E9B8(c);
+        }
+    }
+    c.f[1] = c.ps1[1] = s2d(rd32(0x7FDE8288));
+    c.r[3] = c.r[4] = 0;
+    f_7FD3F324(c);
+    for (int i = 0; i < 70; i++)
+        if (shown[i]) {
+            c.r[3] = otherBase + u32(i) * 108u, c.r[4] = shown[i];
+            f_7FD3E9B8(c);
+        }
+}
+
+// CardCheckSlot (0x7FC06CA8; slot r3, create r4): mounts the card and opens the game's save; with
+// r4 set it creates a missing save itself. On slot A that is always asked, so a new card (hw.cpp
+// formats a blank one) gets its save at the first start without the game's questions.
+void hle_CardCheckSlot(Ctx& c) {
+    if (c.r[3] == 0 && c.r[4] == 0) {
+        static bool logged = false;
+        if (!logged) logf("card", "slot A: the game creates its save by itself if there is none");
+        logged = true;
+        c.r[4] = 1;
+    }
+    f_7FC06CA8_orig(c);
+}
+
+// ---- Pausing the audio commentary ---------------------------------------------------------------
+// Special Features > AUDIO COMMENTARY ON (unlock word +0x658 bit 0x100) plays the developers'
+// commentary in missions as MusyX streams through the voice manager (0x7FE1C1D8: two 0x70-byte
+// slots, +0 = 3 playing, +0x08 its r2voice.vdy entry, +0x0B pan, +0x50 the stream id) while the
+// music and effects are ducked (mixer 0x7FE19510 +0xD58 / +0xD7C, set through 0x7FD4B524). The
+// hotkey (settings HkCommentary: L3 / C) holds the stream where it is (sndStreamFrq 0x80013AC0
+// at frequency 0, its volume 0 through 0x8001386C), lifts the ducking meanwhile, and puts all of
+// it back on the next press.
+namespace {
+std::atomic<bool> s_commentaryToggle{false};
+std::atomic<u8> s_commentaryUi{0};  // 0 none, 1 playing, 2 paused
+std::atomic<u64> s_commentaryStartTb{0};
+struct PausedVoice {
+    u32 stid = 0, frq = 0;
+    u8 pan = 64;
+    bool active = false;
+};
+PausedVoice s_pausedVoice[2];
+bool s_commentaryPaused = false;
+double s_duckVol1 = 0.35, s_duckVol2 = 0.35;
+}  // namespace
+
+void commentaryToggle() { s_commentaryToggle.store(true, std::memory_order_relaxed); }
+
+CommentaryOverlay commentaryOverlay() {
+    const u8 st = s_commentaryUi.load(std::memory_order_relaxed);
+    const u64 t0 = s_commentaryStartTb.load(std::memory_order_relaxed);
+    return {st != 0, st == 2, t0 ? double(tbNow() - t0) / double(kTbClock) : 0.0};
+}
+
+static void commentaryUpdate(Ctx& c) {
+    constexpr u32 kVoiceMgr = 0x7FE1C1D8u, kUnlockWord = 0x7FE1C4A0u + 0x658u, kMixer = 0x7FE19510u;
+    const auto streamFrq = [&](u32 stid, u32 frq) {
+        GuestFrame gf(c);
+        c.r[3] = stid, c.r[4] = frq;
+        f_80013AC0(c);
+    };
+    const auto streamMix = [&](u32 stid, u32 vol, u8 pan) {
+        GuestFrame gf(c);
+        c.r[3] = stid, c.r[4] = vol, c.r[5] = pan, c.r[6] = c.r[7] = c.r[8] = 0;
+        f_8001386C(c);
+    };
+    const auto duck = [&](double v1, double v2, double fade) {
+        GuestFrame gf(c);
+        c.f[1] = c.ps1[1] = rsingle(v1);
+        c.f[2] = c.ps1[2] = rsingle(v2);
+        c.f[3] = c.ps1[3] = rsingle(fade);
+        f_7FD4B524(c);
+    };
+    const bool toggle = s_commentaryToggle.exchange(false, std::memory_order_relaxed);
+    if (s_commentaryPaused) {
+        bool any = false;
+        for (int i = 0; i < 2; i++) {
+            if (!s_pausedVoice[i].active) continue;
+            const u32 slot = kVoiceMgr + u32(i) * 0x70u;
+            if (rd8(slot) == 3 && rd32(slot + 0x50) == s_pausedVoice[i].stid) any = true;
+            else s_pausedVoice[i].active = false;
+        }
+        if (!any) {
+            s_commentaryPaused = false;
+            logf("commentary", "the paused commentary ended (mission over?)");
+        } else if (s2d(rd32(kMixer + 0xD58)) < 0.99 || s2d(rd32(kMixer + 0xD7C)) < 0.99) {
+            duck(1.0, 1.0, 0.2);  // the game ducked again (its pause menu closed): not while paused
+        }
+    }
+    const bool enabled = (rd32(kUnlockWord) & 0x100) != 0;
+    const bool flag = rd8(c.r[13] + 0xFFFFB4E2u) != 0;  // a commentary line runs
+    bool playing = false;
+    for (int i = 0; i < 2; i++) playing |= rd8(kVoiceMgr + u32(i) * 0x70u) == 3;
+    if (toggle) {
+        if (s_commentaryPaused) {
+            for (int i = 0; i < 2; i++) {
+                if (!s_pausedVoice[i].active) continue;
+                streamFrq(s_pausedVoice[i].stid, s_pausedVoice[i].frq);
+                streamMix(s_pausedVoice[i].stid, 127, s_pausedVoice[i].pan);
+                s_pausedVoice[i].active = false;
+            }
+            s_commentaryPaused = false;
+            duck(s_duckVol1, s_duckVol2, 0.25);
+            logf("commentary", "resumed");
+        } else if (enabled && playing) {
+            const u32 vdyMgr = rd32(c.r[13] + 0xFFFFB4F0u);
+            const u32 vdyTbl = vdyMgr ? rd32(vdyMgr + 4) : 0;
+            int n = 0;
+            for (int i = 0; i < 2; i++) {
+                const u32 slot = kVoiceMgr + u32(i) * 0x70u;
+                if (rd8(slot) != 3) continue;
+                const u32 stid = rd32(slot + 0x50);
+                const u8 pan = u8(rd8(slot + 0x0B));
+                const u32 entry = rd16(slot + 0x08);
+                const u32 frq = vdyTbl ? rd16(vdyTbl + entry * 56u + 2u) : 22050u;
+                s_pausedVoice[i] = {stid, frq ? frq : 22050u, pan, true};
+                streamFrq(stid, 0);
+                streamMix(stid, 0, pan);
+                n++;
+            }
+            if (n > 0) {
+                const double d1 = s2d(rd32(kMixer + 0xD58)), d2 = s2d(rd32(kMixer + 0xD7C));
+                s_duckVol1 = d1 > 0.01 && d1 < 0.99 ? d1 : 0.35;
+                s_duckVol2 = d2 > 0.01 && d2 < 0.99 ? d2 : 0.35;
+                duck(1.0, 1.0, 0.25);
+                s_commentaryPaused = true;
+                logf("commentary", "paused (%d stream%s)", n, n == 1 ? "" : "s");
+            }
+        } else {
+            logf("commentary", "hotkey: no commentary playing");
+        }
+    }
+    const u8 st = s_commentaryPaused ? 2 : enabled && flag && playing ? 1 : 0;
+    if (st != 0 && s_commentaryUi.load(std::memory_order_relaxed) == 0) s_commentaryStartTb.store(tbNow(), std::memory_order_relaxed);
+    s_commentaryUi.store(st, std::memory_order_relaxed);
+}
+
+// ---- The mouse in the game's own menus ----------------------------------------------------------
+// gfx/menu.cpp gives the pointer in the menus' 640x480 layout (gfx::takeGameMouse). In the front
+// end (mode 6) pointing at an item of a list selects it (the game's selection and its sound); in
+// the art gallery (screen 0x14 with the gallery showing) a click or the wheel turns the picture;
+// there, in the other front-end screens and on the pause screen a left click is A, a right click
+// B and the wheel up / down, given to port 1 for 3 frames (hw.cpp siPollResponse).
+namespace {
+std::atomic<u16> s_mouseButtons{0};
+}  // namespace
+
+u16 mouseMenuPadButtons() { return s_mouseButtons.load(std::memory_order_relaxed); }
+
+static void mouseMenuUpdate(Ctx& c) {
+    static u16 held = 0;
+    static int heldFrames = 0;
+    if (heldFrames > 0 && --heldFrames == 0) held = 0;
+    const gfx::GameMouse m = gfx::takeGameMouse();
+    const bool inFrontEnd = rd32(0x7FDE8254) == 6;
+    const bool inPause = rd32(0x7FDE8668) == 2;
+    static const bool log = envFlag("R2_MOUSE_LOG");
+    if (log && (m.moved || m.left || m.right || m.wheel)) {
+        const u32 obj = rd32(c.r[13] + 0xFFFFB548u);
+        logf("mouse", "at %.0f, %.0f%s (mode %u, screen %02X, state %u, menu object %08X tag %02X items %d-%d)", m.x, m.y,
+             m.inside ? "" : " outside", rd32(0x7FDE8254), rd8(c.r[13] + 0xFFFFB54Fu), rd32(0x7FDE8668), obj,
+             obj >= 0x7FC00000u && obj < 0x81800000u ? rd8(obj) : 0u, obj >= 0x7FC00000u && obj < 0x81800000u ? int(s8(rd8(obj + 0x25))) : -1,
+             obj >= 0x7FC00000u && obj < 0x81800000u ? int(s8(rd8(obj + 0x24))) - 1 : -1);
+    }
+    if (gfx::menuOpen() || s_moviePausedFlag || !(inFrontEnd || inPause) || !m.inside) {
+        if (!(inFrontEnd || inPause) || gfx::menuOpen()) held = 0, heldFrames = 0;
+        s_mouseButtons.store(held, std::memory_order_relaxed);
+        return;
+    }
+    const auto pulse = [&](u16 b) { held = b, heldFrames = 3; };
+    if (inFrontEnd) {
+        const u32 menuObj = rd32(c.r[13] + 0xFFFFB548u);
+        const u8 screen = u8(rd8(c.r[13] + 0xFFFFB54Fu));
+        const bool objOk = menuObj >= 0x7FC00000u && menuObj < 0x81800000u;
+        const bool gallery = objOk && screen == 0x14 && rd8(menuObj + 0x6794 + 0x3E7) == 1;
+        if (gallery) {
+            if (m.left || m.wheel < 0) pulse(0x0002);       // right: the next picture
+            else if (m.wheel > 0) pulse(0x0001);            // left: the one before
+            else if (m.right) pulse(0x0200);                // B: back
+        } else if (screen != 0x08) {                        // (not the name entry)
+            if (objOk && rd8(menuObj) == 0x26 && (m.moved || m.left)) {
+                const int first = int(s8(rd8(menuObj + 0x25)));
+                const int count = int(s8(rd8(menuObj + 0x24)));
+                const bool row = rd8(menuObj + 0x02) == 1;  // items side by side
+                const u32 slotBase = rd32(menuObj + 0x3B80);
+                if (first >= 0 && count > first && count <= 16 && slotBase >= 0x7FC00000u) {
+                    GuestFrame gf(c);
+                    int best = -1;
+                    float bestDist = 1e9f;
+                    for (int i = first; i < count; i++) {
+                        const u32 slot = slotBase + u32(i) * 108u;
+                        // (not by the shown flag: ON / OFF rows hide one slot and show another there)
+                        if (rd32(slot + 4) == 0 || s32(rd32(slot + 0x60)) <= 0) continue;
+                        c.r[3] = slot, c.r[4] = kScratchBox, c.r[5] = kScratchBox + 4, c.r[6] = kScratchBox + 8, c.r[7] = kScratchBox + 12;
+                        f_7FD3EB1C(c);
+                        const float bx0 = float(s2d(rd32(kScratchBox))), bx1 = float(s2d(rd32(kScratchBox + 4)));
+                        const float by0 = float(s2d(rd32(kScratchBox + 8))), by1 = float(s2d(rd32(kScratchBox + 12)));
+                        float x0 = std::min(bx0, bx1), x1 = std::max(bx0, bx1), y0 = std::min(by0, by1), y1 = std::max(by0, by1);
+                        if (const u32 mat = rd32(slot + 0x68); mat >= 0x7FC00000u && mat < 0x81800000u) {
+                            // the slot's matrix at the text layer's depth (-500 / 32, as 0x7FD3F54C)
+                            float mm[8];
+                            for (int k = 0; k < 8; k++) mm[k] = float(s2d(rd32(mat + u32(k) * 4)));
+                            constexpr float z = -15.625f;
+                            const float ax = mm[0] * bx0 + mm[1] * by0 + mm[2] * z + mm[3], bx = mm[0] * bx1 + mm[1] * by1 + mm[2] * z + mm[3];
+                            const float ay = mm[4] * bx0 + mm[5] * by0 + mm[6] * z + mm[7], by = mm[4] * bx1 + mm[5] * by1 + mm[6] * z + mm[7];
+                            x0 = std::min(ax, bx), x1 = std::max(ax, bx), y0 = std::min(ay, by), y1 = std::max(ay, by);
+                        }
+                        if (!row) {
+                            if (m.x < std::min(x0 - 24.f, 110.f) || m.x > std::max(x1 + 24.f, 530.f)) continue;
+                            const float d = std::fabs(m.y - 0.5f * (y0 + y1));
+                            if (d <= std::max(0.5f * (y1 - y0) + 3.5f, 10.f) && d < bestDist) bestDist = d, best = i;
+                        } else {
+                            if (m.y < y0 - 8.f || m.y > y1 + 8.f) continue;
+                            const float d = std::fabs(m.x - 0.5f * (x0 + x1));
+                            if (d <= std::max(0.5f * (x1 - x0) + 12.f, 24.f) && d < bestDist) bestDist = d, best = i;
+                        }
+                    }
+                    if (best >= 0 && u32(best) != rd8(menuObj + 0x23)) {
+                        wr8(menuObj + 0x23, u8(best));
+                        c.r[3] = 0x1E5, c.r[4] = 0x40;  // the move sound
+                        f_7FD5123C(c);
+                        c.r[3] = menuObj;  // the game's own update of the selection
+                        f_7FD6AF54(c);
+                        logf("mouse", "screen %02X: item %d of %d-%d", screen, best, first, count - 1);
+                    }
+                }
+            }
+            if (m.left) pulse(0x0100);        // A
+            else if (m.right) pulse(0x0200);  // B
+            else if (m.wheel > 0) pulse(0x0008);  // up
+            else if (m.wheel < 0) pulse(0x0004);  // down
+        }
+    } else {
+        if (m.left) pulse(0x0100);
+        else if (m.right) pulse(0x0200);
+        else if (m.wheel > 0) pulse(0x0008);
+        else if (m.wheel < 0) pulse(0x0004);
+    }
+    s_mouseButtons.store(held, std::memory_order_relaxed);
+}
+
+// after a state load: the paused documentary or commentary of the session before is gone
+static void portUiAfterLoad() {
+    s_moviePausedFlag = false;
+    s_movieMenuObj = 0;
+    s_commentaryPaused = false;
+    for (PausedVoice& v : s_pausedVoice) v.active = false;
+    s_mouseButtons.store(0, std::memory_order_relaxed);
+}
+
 // After a load (on the guest's fiber): caches of guest objects start over, a skip in progress
 // ends, and the camera aspect constants hold what the saved session wrote (a stale aspect for
 // the camera objects of the state if the window has another shape now).
@@ -1403,13 +2267,17 @@ void hleAfterLoad() {
     s_healthCraft = 0;
     s_healthFull = 0.f;
     s_healthFlying = false;
-    if (s_skip) {
-        s_skip = false;
+    if (s_skip || s_bootSkipping) {
+        s_skip = s_bootSkipping = false;
+        s_skipDraws.store(false, std::memory_order_relaxed);
+        s_skipShown.store(false, std::memory_order_relaxed);
         viSetRateHz(frameRateHz());
         presentPaced(true);
         setDvdBoost(1.0);
         setAudioSpeed(1.0, false);
     }
+    s_nativeSceneSkip = false;
+    portUiAfterLoad();
     const u32 bits = rd32(0x80099548);  // the world camera's (see setGameAspect)
     s_aspectWritten = bits;
     float f;

@@ -246,6 +246,71 @@ struct BusMix {
     s32* dst;
 };
 
+// R2_VOICE_LOG=1 (issue #57): once a second every voice that played - its PB, format, loop flag
+// and type, the addresses it read (ADPCM: nibbles), its loop and end addresses, its loudest raw
+// sample and volumes, and how often it was past its end address after a subframe.
+struct VoiceSeen {
+    u32 pb = 0, first = 0, lo = 0, hi = 0, loop = 0, end = 0, pastEnd = 0, frames = 0;
+    u16 fmt = 0, lf = 0, lt = 0, vol = 0, vl = 0, vr = 0, vbl = 0, vbr = 0;
+    s32 peak = 0;
+};
+VoiceSeen s_seen[96];
+int s_seenCount = 0;
+u64 s_voiceLogLists = 0;
+u64 s_listNo = 0;  // lists run so far (R2_AUDIO_LOG: voices starting)
+struct VoiceRun {
+    u32 pb;
+    u64 list;
+};
+VoiceRun s_running[128];
+// R2_AUDIO_LOG=1: a voice that was not playing in the previous list starts (latency tests)
+void noteVoiceStart(u32 pb, const u16* w) {
+    static const bool on = envFlag("R2_AUDIO_LOG");
+    if (!on) return;
+    VoiceRun* slot = nullptr;
+    for (VoiceRun& r : s_running)
+        if (r.pb == pb) slot = &r;
+    if (!slot)
+        for (VoiceRun& r : s_running)
+            if (!r.pb || r.list + 2 < s_listNo) slot = &r;
+    if (!slot) return;
+    const bool fresh = slot->pb != pb || slot->list + 1 < s_listNo;
+    slot->pb = pb;
+    slot->list = s_listNo;
+    if (fresh && w[PB_LOOP_FLAG] == 0)
+        logf("audio", "voice %08X starts (one-shot, end %07X, volume L %04X R %04X)", pb,
+             u32(w[PB_END_HI]) << 16 | w[PB_END_LO], w[PB_VL], w[PB_VR]);
+}
+bool voiceLogOn() {
+    static const bool on = envFlag("R2_VOICE_LOG");
+    return on;
+}
+VoiceSeen& seen(u32 pb, const Voice& v) {
+    for (int i = 0; i < s_seenCount; i++)
+        if (s_seen[i].pb == pb) return s_seen[i];
+    VoiceSeen& s = s_seen[s_seenCount < 96 ? s_seenCount++ : 95];
+    s = VoiceSeen{};
+    s.pb = pb;
+    s.first = s.lo = s.hi = v.cur();
+    return s;
+}
+void voiceLogFlush() {
+    if (++s_voiceLogLists % 200 || !s_seenCount) return;
+    for (int i = 0; i < s_seenCount; i++) {
+        const VoiceSeen& s = s_seen[i];
+        // other voices whose reads fall in this one's
+        char ov[64] = "";
+        for (int j = 0; j < s_seenCount; j++)
+            if (j != i && s_seen[j].lo <= s.hi && s_seen[j].hi >= s.lo && std::strlen(ov) < 50)
+                snprintf(ov + std::strlen(ov), sizeof ov - std::strlen(ov), " %08X", s_seen[j].pb);
+        logf("voice", "%08X fmt %02X loop %u/%u first %07X read %07X-%07X loop %07X end %07X past end %u/%u peak %5d vol %04X "
+             "L %04X R %04X BL %04X BR %04X%s%s",
+             s.pb, s.fmt, s.lf, s.lt, s.first, s.lo, s.hi, s.loop, s.end, s.pastEnd, s.frames, s.peak, s.vol, s.vl, s.vr,
+             s.vbl, s.vbr, *ov ? " overlaps" : "", ov);
+    }
+    s_seenCount = 0;
+}
+
 void processVoice(u32 pbAddr) {
     u8* p = mem(pbAddr, PB_WORDS * 2);
     if (!p) return;
@@ -277,8 +342,21 @@ void processVoice(u32 pbAddr) {
             if (off < PB_WORDS) v.w[off] = val;
         }
         if (v.w[PB_STATE] != 1) continue;
+        if (sf == 0) noteVoiceStart(pbAddr, v.w);
         s32 smp[kSub];
+        VoiceSeen* vs = voiceLogOn() ? &seen(pbAddr, v) : nullptr;
         resample(v, smp);
+        if (vs) {
+            const u32 c = v.cur();
+            vs->lo = std::min(vs->lo, c);
+            vs->hi = std::max(vs->hi, c);
+            vs->fmt = v.w[PB_FORMAT], vs->lf = v.w[PB_LOOP_FLAG], vs->lt = v.w[PB_LOOP_TYPE];
+            vs->loop = v.loop(), vs->end = v.end();
+            vs->pastEnd += c > v.end();
+            vs->frames++;
+            for (int i = 0; i < kSub; i++) vs->peak = std::max(vs->peak, std::abs(smp[i]));
+            vs->vol = v.w[PB_VE_VOL], vs->vl = v.w[PB_VL], vs->vr = v.w[PB_VR], vs->vbl = v.w[PB_VBL], vs->vbr = v.w[PB_VBR];
+        }
         s32 vol = v.w[PB_VE_VOL];
         const s32 vdelta = s16(v.w[PB_VE_DELTA]);
         for (int i = 0; i < kSub; i++) {
@@ -596,6 +674,8 @@ bool musyxDspMail(u32 mail, u32& reply) {
     if (s_expectList) {
         s_expectList = false;
         runList(mail);
+        s_listNo++;
+        if (voiceLogOn()) voiceLogFlush();
         reply = 0xDCD10001;  // done with this frame: the task manager calls MusyX's resume callback
         return true;
     }

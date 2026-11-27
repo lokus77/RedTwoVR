@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <ctime>
 #include <mutex>
 #include <set>
@@ -14,6 +15,7 @@
 #include <vector>
 #include <unordered_map>
 
+#include "../card_image.h"
 #include "../mods.h"
 #include "../achievements.h"
 #include "../runtime.h"
@@ -385,7 +387,8 @@ void siUpdateIrq() {
 
 void siPollResponse(int ch, u32& hi, u32& lo) {
     const PadState& p = s_pad[ch];
-    hi = (u32(p.buttons) << 16) | (u32(p.stickX) << 8) | p.stickY;
+    const u16 buttons = ch == 0 ? u16(p.buttons | mouseMenuPadButtons()) : p.buttons;  // (the mouse in the game's menus)
+    hi = (u32(buttons) << 16) | (u32(p.stickX) << 8) | p.stickY;
     lo = (u32(p.substickX) << 24) | (u32(p.substickY) << 16) | (u32(p.triggerL) << 8) | p.triggerR;
 }
 
@@ -628,14 +631,29 @@ void cardInit(int slot, const std::string& path) {
     }
     const u32 size = (m.id & 0xFC) * 1024 * 1024 / 8;
     m.data.assign(size, 0xFF);  // erased flash
+    // A new card, or one that is still all erased flash, is formatted here (as the save importer
+    // does: CARDFormat's layout, flash ID 0, which cardSyncSram recovers), so the game's first
+    // start asks no "format the card?"; with CardCheckSlot's create flag (hle_game.cpp) it makes
+    // its save by itself. From ZeDctr's Red Two Plus fork. A card with anything on it stays as is.
+    const auto formatNew = [&] { card::format(m.data, u64(std::max<time_t>(0, time(nullptr) - 946684800)) * kTbClock); };
     if (f) {
         fread(m.data.data(), 1, size, f);
         fclose(f);
-        logf("card", "slot %c: %s (%u Mbit, %u blocks)", 'A' + slot, path.c_str(), m.id & 0xFC, size / 0x2000 - 5);
+        if (!card::isFormatted(m.data) && std::all_of(m.data.begin(), m.data.end(), [](u8 b) { return b == 0xFF; })) {
+            formatNew();
+            if (FILE* f2 = fopen(path.c_str(), "wb")) {
+                fwrite(m.data.data(), 1, size, f2);
+                fclose(f2);
+            }
+            logf("card", "slot %c: %s was blank: formatted (%u blocks)", 'A' + slot, path.c_str(), size / 0x2000 - 5);
+        } else {
+            logf("card", "slot %c: %s (%u Mbit, %u blocks)", 'A' + slot, path.c_str(), m.id & 0xFC, size / 0x2000 - 5);
+        }
     } else if (FILE* f2 = fopen(path.c_str(), "wb")) {
-        fwrite(m.data.data(), 1, size, f2);  // a new, unformatted card
+        formatNew();
+        fwrite(m.data.data(), 1, size, f2);
         fclose(f2);
-        logf("card", "slot %c: new card %s (unformatted)", 'A' + slot, path.c_str());
+        logf("card", "slot %c: new card %s (formatted, %u blocks)", 'A' + slot, path.c_str(), size / 0x2000 - 5);
     } else {
         logf("card", "slot %c: cannot create %s; no card", 'A' + slot, path.c_str());
         return;
@@ -1018,10 +1036,29 @@ void aramDma() {
     const bool toMram = cntH & 0x8000;
     u8* m = physPtr(mm, cnt);
     if (!m) fatal("ARAM DMA with bad main memory address %08X len %X", mm, cnt);
+    // Past the 16 MiB of internal ARAM is the expansion port, empty on a GameCube: reads give
+    // zeros, writes go nowhere (Dolphin's HSP device "none"). The SDK's ARAM size check at boot
+    // (__ARChecksize, 0x800402C8) writes test data at 0x1000000 and 0x1400000 and reads it back:
+    // when those wrapped to 0 / 0x400000 here it took the ARAM for 8 MiB (__AR_Size 0x80096824),
+    // MusyX put its stream buffers at 8 MiB on top of sound effects the game had loaded there,
+    // and those effects played streamed music and crackled (issue #57: the AT-ATs' steps).
+    // The check also sets the memory map (AR_INFO 0xCC005012, low bits) to 4 for a while, in which
+    // a write below 4 MiB lands 4 MiB higher too; Dolphin's DSP.cpp Do_ARAM_DMA does the same.
+    constexpr u32 kAramSize = 16 * 1024 * 1024;
+    const bool map4 = (dsp[0x12 / 2] & 0xF) == 4;
     for (u32 i = 0; i < cnt; i++) {
-        u8& a = s_aram[(ar + i) & 0x00FFFFFF];
-        if (toMram) m[i] = a;
-        else a = m[i];
+        const u32 x = ar + i;
+        if (x >= kAramSize) {
+            if (toMram) m[i] = 0;
+            continue;
+        }
+        u8& a = s_aram[x];
+        if (toMram) {
+            m[i] = a;
+        } else {
+            a = m[i];
+            if (map4 && x < 0x400000) s_aram[x + 0x400000] = m[i];
+        }
     }
     if (toMram) watchHost(mm, cnt, "ARAM DMA");
     if (static const bool aramLog = envFlag("R2_ARAM_LOG"); aramLog) logf("aram", "%s mram %08X aram %08X len %X", toMram ? "A->M" : "M->A", mm, ar, cnt);
@@ -1050,10 +1087,22 @@ bool musyxPlaying() {
     const u32 base = p ? rdPhys32(p) & 0x03FFFFE0 : 0;
     return base && s_aiDma.addr >= base && s_aiDma.addr < base + 4 * 0x280;
 }
+bool aiCatchUp() {
+    static const bool on = [] {
+        const char* v = getenv("R2_AI_CATCHUP");
+        return !v || atoi(v) != 0;
+    }();
+    return on;
+}
 bool musyxFrameBusy() {
     const u8* p = physPtr(kSalAIBufferBase + 8, 8);
     return p && (rdPhys32(p) == 1 || rdPhys32(p + 4) == 1);
 }
+
+// For the perf lines (issue #22: sound running short in cutscenes on some PCs, the logs could not
+// say where): blocks the audio clock skipped when it fell too far behind (the guest thread held
+// up), and how late block boundaries came (waiting for the game or for MusyX).
+std::atomic<u64> s_aiLostBlocks{0}, s_aiLateSumUs{0}, s_aiLateMaxUs{0}, s_aiBoundaries{0};
 
 void onAi() {
     if (!s_aiDma.on) return;
@@ -1065,16 +1114,22 @@ void onAi() {
     // later): clicks either way. Hardware's boundaries are 5 ms apart and the game always keeps
     // up, so a boundary now waits until the handler gave the DMA its next buffer (AIInitDMA:
     // the address registers moved on; the AIDINT acknowledgement comes before that) and MusyX
-    // is done with that frame, looking again every 0.5 ms, at most kAiWaitMax: the catch-up
-    // runs as fast as the game handles it and the host's audio cushion covers the delay.
-    // Not while a cinematic is skipped: silent, and the audio clock must keep the game's pace.
+    // is done with that frame, looking again every 0.05 ms (0.5 ms before catch-up), at most
+    // kAiWaitMax: the catch-up runs as fast as the game handles it and the host's audio cushion
+    // covers the delay. Not while a cinematic is skipped: silent, and the audio clock must keep
+    // the game's pace. Catch-up (ZeDctr's Red Two Plus fork; R2_AI_CATCHUP=0 for the old way):
+    // the guest thread's safepoints also start due blocks at once (threads.cpp, aiCatchUpStep)
+    // instead of waiting for the timer thread, a block waits for MusyX up to 100 ms (was 20) and
+    // the clock keeps counting from when blocks were due through stalls of up to 16 blocks
+    // (80 ms; was 4): choppy music with V-Sync waits (a frame's 16.7 ms held up the timer's
+    // boundaries) and short host stalls lost blocks instead of catching up.
     const u64 now = tbNow();
-    constexpr u64 kAiWaitMax = kTbClock / 50;  // 20 ms
+    const u64 kAiWaitMax = aiCatchUp() ? kTbClock / 10 : kTbClock / 50;
     if (s_audioSpeed == 1.0 && (dspCsr() & CSR_AIDMSK) && s_aiDue && now - s_aiDue < kAiWaitMax &&
         musyxPlaying()) {
         const u32 next = ((u32(dsp[0x30 / 2]) << 16) | dsp[0x32 / 2]) & 0x03FFFFE0;
         if ((dspCsr() & CSR_AIDINT) || next == s_aiDma.addr || musyxFrameBusy()) {
-            schedule(EV_AI, now + kTbClock / 2000);
+            schedule(EV_AI, now + (aiCatchUp() ? kTbClock / 20000 : kTbClock / 2000));
             return;
         }
     }
@@ -1086,6 +1141,12 @@ void onAi() {
         if ((pending || next == s_aiDma.addr || late > 2.0) && s_audioSpeed == 1.0)
             logf("ai", "boundary %.2f ms late: interrupt %s, next %08X%s", late, pending ? "NOT handled" : "handled",
                  next, next == s_aiDma.addr ? " = the block just played" : "");
+    }
+    if (s_aiDue && s_audioSpeed == 1.0) {
+        const u64 lateUs = now > s_aiDue ? (now - s_aiDue) * 1000000 / kTbClock : 0;
+        s_aiLateSumUs += lateUs;
+        if (lateUs > s_aiLateMaxUs.load(std::memory_order_relaxed)) s_aiLateMaxUs = lateUs;
+        s_aiBoundaries++;
     }
     // the block just finished: latch the next one from the registers and interrupt
     s_aiDma.addr = ((u32(dsp[0x30 / 2]) << 16) | dsp[0x32 / 2]) & 0x03FFFFE0;
@@ -1103,7 +1164,9 @@ void onAi() {
     // Skipping shortens the blocks: MusyX (synthesis, sequencer, streams) keeps pace.
     u64& due = s_aiDue;
     const u64 period = u64(double(samples) * double(kTbClock) / (double(rate) * s_audioSpeed));
-    due = (due && now - due < 4 * period) ? due + period : now + period;
+    const bool keep = due && now - due < (aiCatchUp() ? 16 : 4) * period;
+    if (due && !keep && s_audioSpeed == 1.0 && period) s_aiLostBlocks += (now - due) / period;
+    due = keep ? due + period : now + period;
     schedule(EV_AI, due);
 }
 
@@ -1256,6 +1319,31 @@ void peWrite(u32 off, u16 v) {
 
 }  // namespace
 
+// the perf lines: how late the audio clock's block boundaries came, and blocks it skipped
+std::string aiClockText() {
+    const u64 n = s_aiBoundaries.exchange(0), sum = s_aiLateSumUs.exchange(0), mx = s_aiLateMaxUs.exchange(0),
+              lost = s_aiLostBlocks.exchange(0);
+    char t[128];
+    snprintf(t, sizeof t, "blocks late %.1f ms on average (at most %.0f), %llu skipped", n ? sum / 1000.0 / double(n) : 0.0,
+             mx / 1000.0, (unsigned long long)lost);
+    return t;
+}
+
+// threads.cpp safepoint: a block due now (catch-up, see onAi) starts at once when the game's
+// handler and MusyX are ready for it; else the timer's EV_AI keeps waiting as before
+bool aiCatchUpPending() {
+    return aiCatchUp() && s_aiDma.on && s_audioSpeed == 1.0 && (dspCsr() & CSR_AIDMSK) && s_aiDue && tbNow() >= s_aiDue &&
+           musyxPlaying();
+}
+bool aiCatchUpStep() {
+    if (!aiCatchUpPending()) return false;
+    const u32 next = ((u32(dsp[0x30 / 2]) << 16) | dsp[0x32 / 2]) & 0x03FFFFE0;
+    if ((dspCsr() & CSR_AIDINT) || next == s_aiDma.addr || musyxFrameBusy()) return false;
+    unschedule(EV_AI);
+    onAi();
+    return true;
+}
+
 bool viIsFramebuffer(u32 addr) { return std::find(s_viFbs.begin(), s_viFbs.end(), addr) != s_viFbs.end(); }
 
 u8* aramBase() { return s_aram.data(); }
@@ -1293,6 +1381,15 @@ void peToken(u16 token, bool irq) {
 void peFinish() {
     pe[0x0A / 2] |= 0x08;
     piSetIrq(PI_PE_FINISH, pe[0x0A / 2] & 0x02);
+}
+
+// The GP's state for stall reports (profiler.cpp): a game thread waiting for its frames to be
+// drawn (frames in flight, 0x7FE0C670: one per submitted frame until its draw done's interrupt)
+std::string gpuStateText() {
+    char b[160];
+    snprintf(b, sizeof b, "; PE_CTRL %04X, PI cause %05X mask %05X, frames in flight %u", pe[0x0A / 2], pi_intsr, pi_intmr,
+             peekGuest32(0x7FE0C670));
+    return gxFifoText() + b;
 }
 
 // --- PI helpers (runtime.h) --------------------------------------------------------------

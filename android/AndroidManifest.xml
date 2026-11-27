@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Red Two for Android (tools/build_android.ps1 packs it; version numbers come from there). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="io.github.fhclimited.redtwo"
+    package="io.github.gminustwo.redtwo"
     android:installLocation="auto">
 
     <!-- Aurora draws through Dawn on Vulkan 1.1 -->

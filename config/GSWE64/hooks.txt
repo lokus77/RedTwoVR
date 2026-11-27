@@ -5,6 +5,7 @@
 #   noentry drop a false-positive entry
 #   idle    head of a spin-wait loop: its back-edge blocks the host thread until an event
 #           is due instead of spinning (the loop can only end through an interrupt)
+#   nopoll  loop head whose back-edges take no interrupts (the loop sleeps; see below)
 
 # OS context switching runs on host fibers (src/runtime/threads.cpp)
 savectx OSSaveContext
@@ -16,9 +17,24 @@ hle     OSInitContext
 hle     OSReport
 hle     PPCHalt
 
+# The SDK's audio clock check, a busy-wait timed with the host's clock (src/runtime/hle_os.cpp):
+# it never passed under arm64 translation
+hle     AISrcInit
+
 # OS idle loop in __OSReschedule (0x8002E5EC): no runnable thread, interrupts enabled,
 # spins on RunQueueBits until an interrupt handler readies a thread
 idle    8002E724
+
+# The game waits for its frames in flight (0x7FE0C670) to be drawn with interrupts enabled:
+#   7FD46400: OSSleepThread(0x7FE0C6F4); 7FD46408: if (frames in flight > 0) goto 7FD46400
+# Interrupts were taken at the back-edge, between the check and the sleep: a draw done's
+# callback delivered there counted the last frame and woke a queue nobody slept on yet, and the
+# game thread then slept for good (the freeze entering the attract demo or after a mission,
+# issues #33 #36 #50; most runs under Android's arm64 translation, where the window is long). On
+# hardware the window is a few instructions; without the poll the interrupt is taken inside
+# OSSleepThread's reschedule, after the thread is on the queue. (The SDK's own loops of this
+# shape, 0x8003C468 and 0x80043054, run with interrupts disabled.)
+nopoll  7FD46400
 
 # MusyX: the DSP is emulated as infinitely fast, so a late command list costs it nothing.
 # The CPU-side estimate (time since the AI interrupt) can look like several ms when the
@@ -27,6 +43,11 @@ hle     salBuildCommandList
 
 # Port options (src/runtime/hle_game.cpp): frame delta at retrace rates above 59.94 Hz
 hle     GameFrameDelta
+# The documentary / teaser player: its real frame time above 60 fps, seeking and a pause menu
+hle     MovieUpdate
+hle     MovieEndDraw
+# Memory card: the game's own automatic creation of its save file on slot A (no prompt at first start)
+hle     CardCheckSlot
 # Cheats (settings): infinite lives, invincibility (the player's craft is never destroyed)
 hle     LoseLife
 hle     CraftDestroy

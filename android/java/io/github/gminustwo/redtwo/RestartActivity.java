@@ -1,6 +1,6 @@
 // Restarts Red Two: runs in a process of its own (AndroidManifest.xml), ends the game's process
 // (whose card and save state writes are done) and starts the game's activity again.
-package io.github.fhclimited.redtwo;
+package io.github.gminustwo.redtwo;
 
 import android.app.Activity;
 import android.content.Intent;

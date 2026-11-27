@@ -1,0 +1,23 @@
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index c154a74..2c2c422 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -132,7 +132,6 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
+     break;
+   case GX_BM_LOGIC:
+     switch (op) {
+-      DEFAULT_FATAL("unsupported logic op {}", underlying(op));
+     case GX_LO_CLEAR:
+       colorBlendComponent = {
+           .operation = wgpu::BlendOperation::Add,
+@@ -140,6 +139,10 @@ wgpu::BlendState to_blend_state(GXBlendMode mode, GXBlendFactor srcFac, GXBlendF
+           .dstFactor = wgpu::BlendFactor::Zero,
+       };
+       break;
++    default:
++      // (no blend state does the other logic ops: drawn as COPY instead of stopping the program)
++      Log.warn("unsupported logic op {}, drawn as copy", underlying(op));
++      [[fallthrough]];
+     case GX_LO_COPY:
+       colorBlendComponent = {
+           .operation = wgpu::BlendOperation::Add,

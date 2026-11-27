@@ -345,6 +345,17 @@ void gxFlushGatherPipe() {
     burst();
 }
 
+// (read on the stall watchdog's thread while the game thread may be changing it: a hint, not exact)
+std::string gxFifoText() {
+    char b[256];
+    snprintf(b, sizeof b,
+             "GP FIFO %08X-%08X read %08X write %08X (%u bytes unread), breakpoint %08X %s%s, CP_CR %04X; "
+             "CPU FIFO write %08X, %u bytes in the gather pipe",
+             s_cpBase, s_cpEnd, s_cpRp, s_cpWp, cpDistance(), s_cpBp, (s_cpCr & CR_BP) ? "on" : "off",
+             s_bpHit ? " (the GP stopped there)" : "", s_cpCr, s_piWp, s_gpLen);
+    return b;
+}
+
 void gxResetGatherPipe() {
     static int n = 0;
     if (s_gpLen && n++ < 16) {

@@ -3,7 +3,7 @@
 // on Windows, the discord-ipc-N socket in the runtime or temporary folder elsewhere, Flatpak's and
 // Snap's included). No library: the protocol is a frame of an opcode, a length and JSON (0 handshake,
 // 1 a command, 2 close, 3 ping, 4 pong). Nothing goes anywhere but the Discord app on this computer,
-// and only while the setting discord_presence (DISPLAY > GAME) is on. Same protocol code as msr2ds.
+// and only while the setting discord_presence (GAME tab) is on. Same protocol code as msr2ds.
 //   - the launcher: "In the launcher";
 //   - the game: the level resource it read last from the disc (lNN of lvlPackNN.dat, main.cpp
 //     discNoteRead) - a mission's name, the hangar or the menus - and in a mission whether the
@@ -364,7 +364,7 @@ void work() {
                 c.shut();
                 logf("discord", "Rich Presence turned off: cleared");
             } else if (!toldOff) {
-                logf("discord", "Rich Presence is off (DISPLAY > GAME > Discord Rich Presence)");
+                logf("discord", "Rich Presence is off (GAME > Discord Rich Presence)");
             }
             toldOff = true;
             shown.clear();

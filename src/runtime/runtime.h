@@ -21,6 +21,7 @@ void printTraceRing(FILE* f, int n);
 void debugInit();  // R2_LOGFN, R2_WATCH
 void dumpThreads();  // guest OSThread list (debugging)
 u32 peekGuest32(u32 a);  // a guest word without faulting (VM pages not mapped read as 0)
+std::string gpuStateText();  // hw.cpp: the GP's FIFO, breakpoint, PE and PI state (stall reports)
 std::string guestBacktrace();  // threads.cpp: the running guest thread's call chain (fatal errors)
 void printHostStack(FILE* f, int skip);  // main.cpp: the host call stack, symbolized (fatal errors)
 #ifndef _WIN32
@@ -35,6 +36,9 @@ constexpr u32 kLockedCache = 0xE0000000, kLockedCacheSize = 0x4000;
 // it): enlarged copies of tables the game sizes for its 4:3 view (hle_game.cpp, port tables).
 // Committed at start and saved in states.
 constexpr u32 kPortArena = 0x8F000000, kPortArenaSize = 0x80000;
+// its last 4 KiB: strings the game's text code points at for the port's own text in its menus,
+// and rectangles its functions fill (hle_game.cpp)
+constexpr u32 kPortScratch = kPortArena + kPortArenaSize - 0x1000;
 // The game's heap extension: 8 MiB of RAM right after MEM1 (physical 0x01800000-0x01FFFFFF,
 // cached 0x81800000 and uncached 0xC1800000, mapped with MEM1 like a 32 MiB console), which the
 // game is never told about (0x80000028 says 24 MiB) and only gets for an allocation its full
@@ -158,7 +162,12 @@ u32 viRetraceCount();      // retraces so far
 u32 viXfbLines();          // lines the VI scans out (304 for letterboxed cinematics, 450 in game)
 void setAudioSpeed(double speed, bool mute);  // hw.cpp: AI (audio) clock speed-up, output muted
 void setDvdBoost(double boost);               // hw.cpp: disc reads that much faster
-bool cinematicSkip();                         // hle_game.cpp: a cinematic is being skipped
+bool cinematicSkip();                         // hle_game.cpp: a cinematic (or the boot screen) is being skipped
+bool skipShown();
+bool playerFlying();                          // hle_game.cpp: the player's craft is flying (not paused / a cutscene / the menus)                             // hle_game.cpp: ... by a skip the player chose ("SKIPPING" shown)
+std::string aiClockText();  // hw.cpp: perf lines - how late audio blocks came, blocks skipped (since the last call)
+bool aiCatchUpPending();  // hw.cpp: an audio (AI) block is due and MusyX may take it (threads.cpp safepoint)
+bool aiCatchUpStep();     // hw.cpp: start that block now if MusyX is ready for it
 void setGameAspect(double aspect);  // hle_game.cpp: the game's camera aspect (widescreen)
 // hw.cpp: a display copy to dest lands at this line of the VI's (front or back) frame buffer
 bool viLocateCopy(u32 dest, u32 strideBytes, u32& line, u32& lines);
@@ -175,6 +184,33 @@ void setRestartProgram(const std::string& path);  // main.cpp: restarts start th
 // main.cpp: the window was closed or the menu's quit chosen: a save state being written and the
 // memory card's last writes reach their files, then the process ends
 [[noreturn]] void quitToDesktop();
+
+// hle_game.cpp: the documentary / teaser player's state for its overlay (gfx/menu.cpp): progress
+// bar while paused and for 2 s after a seek, the pause menu's rows under the mouse
+struct MovieOverlay {
+    bool active = false, paused = false;
+    int pauseSel = 0;  // 0 CONTINUE, 1 BACK
+    double curSec = 0.0, totalSec = 0.0;
+    u64 lastActionTb = 0;  // the last seek, pause or continue
+};
+MovieOverlay movieOverlay();
+bool movieFullscreenActive();             // a full-screen .movie plays (shown at 4:3)
+void moviePauseMouse(int sel, bool click);  // gfx/menu.cpp: the pointer over a pause menu row
+// hle_game.cpp: hold B to skip (the ring in the corner)
+struct CutsceneSkipOverlay {
+    bool visible = false, holding = false;
+    float progress = 0.f;  // 0..1 while B is held
+    float alpha = 1.f;
+};
+CutsceneSkipOverlay cutsceneSkipOverlay();
+// hle_game.cpp: the audio commentary (hotkey HkCommentary pauses it)
+struct CommentaryOverlay {
+    bool active = false, paused = false;
+    double secs = 0.0;  // since a commentary line started
+};
+CommentaryOverlay commentaryOverlay();
+void commentaryToggle();  // hotkeys.cpp: pause / resume at the game's next frame
+u16 mouseMenuPadButtons();  // hle_game.cpp: port 1's buttons from the mouse in the game's menus (hw.cpp)
 
 // hle_game.cpp: the game's own passcode unlocks (two flag words of its progress block, kept in
 // its save), for the menu's cheats page
@@ -196,10 +232,18 @@ void touchDraw();
 bool touchApply(void* padStatus);
 void setHudAnchoring(bool on);  // gfx/menu.cpp: widescreen HUD pieces at the screen edges (in flight)
 void noteWidenedAspect(float aspect);  // gfx/menu.cpp: a projection aspect a camera was widened to
-void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox / PlayStation button prompts per the setting, controller and bindings
+void buttonIconsUpdate();  // gfx/button_icons.cpp: Xbox / PlayStation / Switch button prompts per the setting, controller and bindings
 void buttonIconsNoteTexture(u32 fmt, u32 w, u32 h, const u8* data, u32 bytes);  // a bound texture (baked prompts)
 void setMenuTiling(bool on);    // gfx/gx_bridge.cpp: widescreen menu backgrounds tiled into the sides
 void resendStereoViews();       // gfx/gx_bridge.cpp: VR: the eyes' views again (the camera turned with the head)
+char buttonGlyphForGcB();  // gfx/button_icons.cpp: the face shown for GameCube B ('A'/'B'/'X'/'Y'; PlayStation 'x' 'o' 's' 't')
+// gfx/menu.cpp: the mouse in the game's 640x480 menu layout, clicks and wheel since the last call
+struct GameMouse {
+    bool inside = false, moved = false, left = false, right = false;
+    float x = 0.f, y = 0.f;
+    int wheel = 0;  // +1 up, -1 down
+};
+GameMouse takeGameMouse();
 }
 
 namespace input {
@@ -208,6 +252,8 @@ void poll();  // once per frame: Aurora pads/keyboard -> SI controller state
 void rumble(int chan, u32 cmd);  // SI motor bits: 0 stop, 1 rumble, 2 hard stop
 bool isPlayStation(int sdlGamepadType);  // an SDL_GamepadType of a PS3 / PS4 / PS5 controller
 bool port1PlayStation();  // port 1's controller is a PlayStation one (as of the last poll; button prompts)
+bool isNintendoSwitch(int sdlGamepadType);  // a Switch Pro Controller or Joy-Cons
+bool port1NintendoSwitch();  // port 1's controller is a Switch one (as of the last poll; button prompts)
 // the settings' deadzone (round, rescaled) and sensitivity of the control stick or the C-stick; -1..1
 void shapeStick(float& x, float& y, bool mainStick);
 // The control stick (-1..1, as the controller reports it) as the game gets it: raw PADStatus

@@ -62,6 +62,11 @@ u64 s_fullSinceTb = 0;  // the queue has been past kMaxMs since then (0: it is n
 // for the perf lines (perfText): since the last one
 std::atomic<u64> s_perfBlocks{0}, s_perfGaps{0}, s_perfDropped{0}, s_perfReopened{0};
 std::atomic<int> s_perfPeak{0};
+// the output queue at each block while playing (ms x 10), for the perf lines: with the device's
+// own buffer it is how far the sound lags the game (the user's "delayed by a second or two")
+std::atomic<u64> s_perfQueueSum{0}, s_perfQueueCount{0};
+std::atomic<int> s_perfQueueMin{1 << 30}, s_perfQueueMax{0};
+int s_deviceFrames = 0, s_deviceRate = 0;  // the device's buffer (SDL's sample frames)
 
 void writeWavHeader() {
     auto u32le = [](u8* p, u32 v) { p[0] = u8(v); p[1] = u8(v >> 8); p[2] = u8(v >> 16); p[3] = u8(v >> 24); };
@@ -133,8 +138,14 @@ bool openStream() {
     s_playing = false;
     s_ratio = 1.f;
     s_fullSinceTb = 0;
-    logf("audio", "output: %u Hz %s, %.0f ms buffered, on %s (%d channels)", s_rate, layoutName(s_channels),
-         s_targetMs, deviceName(SDL_GetAudioStreamDevice(s_stream)).c_str(), deviceChannels());
+    SDL_AudioSpec dev{};
+    s_deviceFrames = 0;
+    if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(s_stream), &dev, &s_deviceFrames)) s_deviceRate = dev.freq;
+    logf("audio", "output: %u Hz %s, %.0f ms buffered, on %s (%d channels; the device takes %d frames at %d Hz, %.1f ms, "
+                  "through %s)",
+         s_rate, layoutName(s_channels), s_targetMs, deviceName(SDL_GetAudioStreamDevice(s_stream)).c_str(), deviceChannels(),
+         s_deviceFrames, s_deviceRate, s_deviceRate ? s_deviceFrames * 1000.0 / s_deviceRate : 0.0,
+         SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?");
     return true;
 }
 
@@ -239,10 +250,16 @@ std::string perfText() {
     const u64 blocks = s_perfBlocks.exchange(0), gaps = s_perfGaps.exchange(0), dropped = s_perfDropped.exchange(0),
               reopened = s_perfReopened.exchange(0);
     const int peak = s_perfPeak.exchange(0);
-    char t[160];
-    snprintf(t, sizeof t, "sound %llu blocks, peak %d%%, %llu gaps, %llu dropped%s", (unsigned long long)blocks,
+    const u64 qSum = s_perfQueueSum.exchange(0), qCount = s_perfQueueCount.exchange(0);
+    const int qMin = s_perfQueueMin.exchange(1 << 30), qMax = s_perfQueueMax.exchange(0);
+    char q[96] = "";
+    if (qCount)
+        snprintf(q, sizeof q, ", queued %.0f ms (%.0f-%.0f) + device %.0f ms", qSum / 10.0 / double(qCount), qMin / 10.0,
+                 qMax / 10.0, s_deviceRate ? s_deviceFrames * 1000.0 / s_deviceRate : 0.0);
+    char t[400];
+    snprintf(t, sizeof t, "sound %llu blocks, peak %d%%, %llu gaps, %llu dropped%s%s, %s", (unsigned long long)blocks,
              peak * 100 / 32768, (unsigned long long)gaps, (unsigned long long)dropped,
-             reopened ? ", output reopened" : "");
+             reopened ? ", output reopened" : "", q, aiClockText().c_str());
     return t;
 }
 
@@ -313,6 +330,22 @@ void push(const u8* data, u32 frames, u32 rate) {
     const double bytesPerMs = s_rate * 2.0 * s_channels / 1000.0;
     const double queuedMs = SDL_GetAudioStreamQueued(s_stream) / bytesPerMs;
     logQueue(queuedMs);
+    if (s_playing) {
+        const int q10 = int(queuedMs * 10.0);
+        s_perfQueueSum += u64(q10);
+        s_perfQueueCount++;
+        if (q10 < s_perfQueueMin.load(std::memory_order_relaxed)) s_perfQueueMin = q10;
+        if (q10 > s_perfQueueMax.load(std::memory_order_relaxed)) s_perfQueueMax = q10;
+    }
+    // R2_AUDIO_LOG: a sound starting after quiet (latency tests: against "script: buttons" lines)
+    if (static const bool log = envFlag("R2_AUDIO_LOG"); log) {
+        static int quiet = 0;
+        if (peak < 300) quiet++;
+        else {
+            if (quiet >= 8 && peak > 2000) logf("audio", "sound starts (peak %d) with %.1f ms queued", peak, queuedMs);
+            quiet = 0;
+        }
+    }
     // Ran dry (a dry stream still reports ~0.2 ms: the resampler's leftovers): one clean gap
     // while the cushion refills, instead of playing on with nothing in hand.
     if (s_playing && queuedMs < 2.0) {
